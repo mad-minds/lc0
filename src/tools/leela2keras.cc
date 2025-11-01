@@ -55,6 +55,9 @@ const OptionId kWeightsDirId{
     "weights-dir", "",
     "Optional directory to save weight .npy files (for cleaner Python code). "
     "If not specified, defaults to a temporary directory based on output filename."};
+const OptionId kKeepWeightsDirId{
+    "keep-weights-dir", "",
+    "Keep the weights directory after conversion (by default it's deleted)."};
 
 bool ProcessParameters(OptionsParser* options) {
   options->Add<StringOption>(kInputFilenameId);
@@ -66,6 +69,7 @@ bool ProcessParameters(OptionsParser* options) {
   options->Add<StringOption>(kPolicyHead) = "vanilla";
   options->Add<StringOption>(kPythonOutputFileId) = "";
   options->Add<StringOption>(kWeightsDirId) = "";
+  options->Add<BoolOption>(kKeepWeightsDirId) = false;
   if (!options->ProcessAllFlags()) return false;
 
   const OptionsDict& dict = options->GetOptionsDict();
@@ -113,6 +117,7 @@ void ConvertLeelaToKeras() {
     weights_dir = base_name + "_weights";
   }
   keras_options.weights_dir = weights_dir;
+  keras_options.cleanup_weights_dir = !dict.Get<bool>(kKeepWeightsDirId);
   
   ConvertWeightsToKeras(weights_file, keras_options,
                        dict.Get<std::string>(kOutputFilenameId));

@@ -38,6 +38,7 @@ struct WeightsToKerasConverterOptions {
   std::string value_head = "winner";
   std::string python_output_file = "";  // Optional: path to output the generated Python code
   std::string weights_dir = "";  // Optional: directory to save weight .npy files (for cleaner Python code)
+  bool cleanup_weights_dir = true;  // Whether to clean up the weights directory after conversion
 
   static DataType StringToDataType(const std::string&);
 };

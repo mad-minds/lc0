@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <vector>
 
@@ -59,177 +60,54 @@ class PythonInterpreter {
     // Add site-packages paths after initialization
     // This ensures Python can find TensorFlow and other installed packages
     AddSitePackagesToPath();
+    
+    // Add the current working directory to Python path to find lc0_keras_layers
+    AddCurrentDirToPath();
 
     // Build import statements for the script
+    script_ << "import sys\n";
+    script_ << "import os\n";
+    script_ << "\n";
     script_ << "import tensorflow as tf\n";
     script_ << "from tensorflow import keras\n";
     script_ << "from tensorflow.keras import layers\n";
     script_ << "from keras import ops\n";
     script_ << "import numpy as np\n";
-    script_ << "import keras as keras_core\n";
+    script_ << "\n";
+    script_ << "# Import custom LCZero Keras layers\n";
+    script_ << "# Install: uv add git+https://github.com/LeelaChessZero/lc0#subdirectory=src/python\n";
+    script_ << "import lc0keras\n";
+    script_ << "from lc0keras import (\n";
+    script_ << "    MatMul, Gather, DynamicTile, StaticRepeat, SliceLayer,\n";
+    script_ << "    FlattenBatchSpatial, UnflattenBatchSpatial, DynamicReshape\n";
+    script_ << ")\n";
     script_ << "\n";
     
-    // Add custom serializable layers for operations without native Keras equivalents
-    script_ << "# Custom serializable layers for operations that don't have native Keras equivalents\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class MatMul(layers.Layer):\n";
-    script_ << "    \"\"\"Matrix multiplication layer that properly serializes.\"\"\"\n";
-    script_ << "    def __init__(self, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        return ops.matmul(inputs[0], inputs[1])\n";
-    script_ << "    \n";
-    script_ << "    def compute_output_shape(self, input_shapes):\n";
-    script_ << "        # Batch matmul: (..., m, k) x (..., k, n) -> (..., m, n)\n";
-    script_ << "        return input_shapes[0][:-1] + (input_shapes[1][-1],)\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class Gather(layers.Layer):\n";
-    script_ << "    \"\"\"Gather layer with axis parameter.\"\"\"\n";
-    script_ << "    def __init__(self, axis=0, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "        self.axis = axis\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        # keras.ops.gather doesn't exist, use ops.take_along_axis or tf.gather\n";
-    script_ << "        import tensorflow as tf\n";
-    script_ << "        return tf.gather(inputs[0], inputs[1], axis=self.axis)\n";
-    script_ << "    \n";
-    script_ << "    def compute_output_shape(self, input_shapes):\n";
-    script_ << "        # Gathering along axis, indices shape replaces that dimension\n";
-    script_ << "        if self.axis == 1:\n";
-    script_ << "            return (input_shapes[0][0], input_shapes[1][0])\n";
-    script_ << "        return input_shapes[0]\n";
-    script_ << "    \n";
-    script_ << "    def get_config(self):\n";
-    script_ << "        config = super().get_config()\n";
-    script_ << "        config['axis'] = self.axis\n";
-    script_ << "        return config\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class DynamicTile(layers.Layer):\n";
-    script_ << "    \"\"\"Tile layer that handles dynamic batch size.\"\"\"\n";
-    script_ << "    def __init__(self, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        # inputs[0] is the reference tensor for batch size\n";
-    script_ << "        # inputs[1] is the tensor to tile (must be shape-compatible)\n";
-    script_ << "        batch_size = ops.shape(inputs[0])[0:1]\n";
-    script_ << "        expanded = ops.expand_dims(inputs[1], axis=0)\n";
-    script_ << "        repeats = ops.concatenate([ops.reshape(batch_size, (1,)), ops.array([1, 1])])\n";
-    script_ << "        return ops.tile(expanded, repeats)\n";
-    script_ << "    \n";
-    script_ << "    def compute_output_shape(self, input_shapes):\n";
-    script_ << "        # Output shape: (batch, *input_shapes[1])\n";
-    script_ << "        return (input_shapes[0][0],) + input_shapes[1]\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class StaticRepeat(layers.Layer):\n";
-    script_ << "    \"\"\"Repeat layer with fixed repetition count.\"\"\"\n";
-    script_ << "    def __init__(self, repeats, axis=0, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "        self.repeats = repeats\n";
-    script_ << "        self.axis = axis\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        expanded = ops.expand_dims(inputs, axis=self.axis)\n";
-    script_ << "        return ops.repeat(expanded, self.repeats, axis=self.axis)\n";
-    script_ << "    \n";
-    script_ << "    def get_config(self):\n";
-    script_ << "        config = super().get_config()\n";
-    script_ << "        config['repeats'] = self.repeats\n";
-    script_ << "        config['axis'] = self.axis\n";
-    script_ << "        return config\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class SliceLayer(layers.Layer):\n";
-    script_ << "    \"\"\"Slice layer with start and size parameters.\"\"\"\n";
-    script_ << "    def __init__(self, start_indices, sizes, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "        self.start_indices = start_indices\n";
-    script_ << "        self.sizes = sizes\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        return ops.slice(inputs, self.start_indices, self.sizes)\n";
-    script_ << "    \n";
-    script_ << "    def get_config(self):\n";
-    script_ << "        config = super().get_config()\n";
-    script_ << "        config['start_indices'] = self.start_indices\n";
-    script_ << "        config['sizes'] = self.sizes\n";
-    script_ << "        return config\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class FlattenBatchSpatial(layers.Layer):\n";
-    script_ << "    \"\"\"Flatten batch and spatial dimensions: (batch, 64, C) -> (batch*64, C).\"\"\"\n";
-    script_ << "    def __init__(self, channels, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "        self.channels = channels\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        return ops.reshape(inputs, (-1, self.channels))\n";
-    script_ << "    \n";
-    script_ << "    def compute_output_shape(self, input_shape):\n";
-    script_ << "        return (None, self.channels)\n";
-    script_ << "    \n";
-    script_ << "    def get_config(self):\n";
-    script_ << "        config = super().get_config()\n";
-    script_ << "        config['channels'] = self.channels\n";
-    script_ << "        return config\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class UnflattenBatchSpatial(layers.Layer):\n";
-    script_ << "    \"\"\"Unflatten batch and spatial dimensions: (batch*64, C) -> (batch, 64, C).\"\"\"\n";
-    script_ << "    def __init__(self, channels, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "        self.channels = channels\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        return ops.reshape(inputs, (-1, 64, self.channels))\n";
-    script_ << "    \n";
-    script_ << "    def compute_output_shape(self, input_shape):\n";
-    script_ << "        return (None, 64, self.channels)\n";
-    script_ << "    \n";
-    script_ << "    def get_config(self):\n";
-    script_ << "        config = super().get_config()\n";
-    script_ << "        config['channels'] = self.channels\n";
-    script_ << "        return config\n";
-    script_ << "\n";
-    script_ << "@keras_core.saving.register_keras_serializable()\n";
-    script_ << "class DynamicReshape(layers.Layer):\n";
-    script_ << "    \"\"\"Dynamic reshape with -1 for automatic dimension inference.\"\"\"\n";
-    script_ << "    def __init__(self, target_shape, output_shape_tuple, **kwargs):\n";
-    script_ << "        super().__init__(**kwargs)\n";
-    script_ << "        self.target_shape = target_shape  # tuple with -1 for auto dim\n";
-    script_ << "        self.output_shape_tuple = output_shape_tuple  # for compute_output_shape\n";
-    script_ << "    \n";
-    script_ << "    def call(self, inputs):\n";
-    script_ << "        return ops.reshape(inputs, self.target_shape)\n";
-    script_ << "    \n";
-    script_ << "    def compute_output_shape(self, input_shape):\n";
-    script_ << "        return self.output_shape_tuple\n";
-    script_ << "    \n";
-    script_ << "    def get_config(self):\n";
-    script_ << "        config = super().get_config()\n";
-    script_ << "        config['target_shape'] = self.target_shape\n";
-    script_ << "        config['output_shape_tuple'] = self.output_shape_tuple\n";
-    script_ << "        return config\n";
-    script_ << "\n";
-    
-    // Also add all imports and custom classes to code_log_ if tracking
+    // Also add imports to code_log_ if tracking (for --python-output file)
     if (track_code_) {
+      code_log_ += "#!/usr/bin/env python3\n";
+      code_log_ += "\"\"\"LCZero Keras model generation script.\n";
+      code_log_ += "\n";
+      code_log_ += "This script generates a Keras model from LCZero network weights.\n";
+      code_log_ += "\n";
+      code_log_ += "Requirements:\n";
+      code_log_ += "    pip install lc0-keras\n";
+      code_log_ += "    # or\n";
+      code_log_ += "    uv add git+https://github.com/LeelaChessZero/lc0#subdirectory=src/python\n";
+      code_log_ += "\"\"\"\n";
       code_log_ += "import tensorflow as tf\n";
       code_log_ += "from tensorflow import keras\n";
       code_log_ += "from tensorflow.keras import layers\n";
       code_log_ += "from keras import ops\n";
       code_log_ += "import numpy as np\n";
-      code_log_ += "import keras as keras_core\n";
       code_log_ += "\n";
-      code_log_ += "# Custom serializable layers for operations that don't have native Keras equivalents\n";
-      // Add all the custom layer definitions to code_log
-      // Copy the entire custom layer definition block
-      code_log_ += script_.str();
+      code_log_ += "# Import custom LCZero Keras layers\n";
+      code_log_ += "import lc0keras\n";
+      code_log_ += "from lc0keras import (\n";
+      code_log_ += "    MatMul, Gather, DynamicTile, StaticRepeat, SliceLayer,\n";
+      code_log_ += "    FlattenBatchSpatial, UnflattenBatchSpatial, DynamicReshape\n";
+      code_log_ += ")\n";
+      code_log_ += "\n";
     }
   }
 
@@ -291,59 +169,60 @@ class PythonInterpreter {
   std::string GetCodeLog() const { return code_log_.empty() ? script_.str() : code_log_; }
   void ClearCodeLog() { code_log_.clear(); script_.str(""); script_.clear(); }
 
-  // Save numpy array to .npy file using Python (more reliable than manual format)
+  // Save numpy array to .npy file directly in C++ (much faster than Python string conversion)
   void SaveNumpyArray(const std::string& file_path,
                       const std::vector<float>& data,
                       const std::vector<int>& shape) {
-    // Use Python to save the file properly
-    std::ostringstream save_code;
-    save_code << "import numpy as np\n";
-    save_code << "import os\n";
-    save_code << "os.makedirs(os.path.dirname(r'" << file_path << "'), exist_ok=True)\n";
-    save_code << "_data = [";
+    // Create directory if needed
+    std::filesystem::path path(file_path);
+    std::filesystem::create_directories(path.parent_path());
     
-    for (size_t i = 0; i < data.size(); ++i) {
-      if (i > 0) save_code << ", ";
-      save_code << std::setprecision(9) << std::fixed << data[i];
+    // Open file for binary writing
+    std::ofstream file(file_path, std::ios::binary);
+    if (!file.is_open()) {
+      throw Exception("Failed to open file for writing: " + file_path);
     }
     
-    save_code << "]\n";
-    save_code << "_arr = np.array(_data, dtype=np.float32).reshape((";
+    // Write .npy header (version 1.0 format)
+    // Magic string
+    file.write("\x93NUMPY", 6);
+    
+    // Version
+    file.put(1);  // major
+    file.put(0);  // minor
+    
+    // Build header dict
+    std::ostringstream header;
+    header << "{'descr': '<f4', 'fortran_order': False, 'shape': (";
     for (size_t i = 0; i < shape.size(); ++i) {
-      if (i > 0) save_code << ", ";
-      save_code << shape[i];
+      if (i > 0) header << ", ";
+      header << shape[i];
     }
-    save_code << "))\n";
+    if (shape.size() == 1) header << ",";  // Trailing comma for 1D arrays
+    header << "), }";
     
-    // Escape backslashes in path
-    std::string escaped_path = file_path;
-    size_t pos = 0;
-    while ((pos = escaped_path.find('\\', pos)) != std::string::npos) {
-      escaped_path.replace(pos, 1, "\\\\");
-      pos += 2;
+    // Pad header to multiple of 64 bytes (including magic + version + header_len)
+    std::string header_str = header.str();
+    size_t total_header_size = 6 + 2 + 2 + header_str.size() + 1;  // +1 for newline
+    size_t padding = (64 - (total_header_size % 64)) % 64;
+    for (size_t i = 0; i < padding; ++i) {
+      header_str += ' ';
     }
+    header_str += '\n';
     
-    save_code << "np.save(r'" << escaped_path << "', _arr)\n";
-    save_code << "del _data, _arr\n";
+    // Write header length (little-endian uint16)
+    uint16_t header_len = static_cast<uint16_t>(header_str.size());
+    file.write(reinterpret_cast<const char*>(&header_len), 2);
     
-    // Execute immediately to save the file
-    int result = PyRun_SimpleString(save_code.str().c_str());
-    if (result != 0) {
-      PyObject* ptype, *pvalue, *ptraceback;
-      PyErr_Fetch(&ptype, &pvalue, &ptraceback);
-      std::string error_msg = "Failed to save numpy array: ";
-      if (pvalue) {
-        PyObject* str = PyObject_Str(pvalue);
-        if (str) {
-          const char* msg = PyUnicode_AsUTF8(str);
-          if (msg) error_msg += msg;
-          Py_DECREF(str);
-        }
-      }
-      Py_XDECREF(ptype);
-      Py_XDECREF(pvalue);
-      Py_XDECREF(ptraceback);
-      throw Exception(error_msg + " (file: " + file_path + ")");
+    // Write header
+    file.write(header_str.c_str(), header_str.size());
+    
+    // Write data (float32, little-endian)
+    file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    
+    file.close();
+    if (!file.good()) {
+      throw Exception("Failed to write numpy array to file: " + file_path);
     }
   }
 
@@ -482,6 +361,23 @@ class PythonInterpreter {
     // Execute immediately (not deferred) - needed for SaveNumpyArray to work
     PyRun_SimpleString(code.str().c_str());
   }
+  
+  void AddCurrentDirToPath() {
+    // Add src/python to Python path for local development
+    // This allows importing lc0keras when running from the lc0 repo
+    std::ostringstream code;
+    code << "import sys\n";
+    code << "import os\n";
+    code << "# Add src/python for local development (lc0keras package)\n";
+    code << "cwd = os.getcwd()\n";
+    code << "src_python = os.path.join(cwd, 'src', 'python')\n";
+    code << "if os.path.exists(src_python) and src_python not in sys.path:\n";
+    code << "    sys.path.insert(0, src_python)\n";
+    code << "\n";
+    
+    // Execute immediately
+    PyRun_SimpleString(code.str().c_str());
+  }
 };
 
 class KerasConverter {
@@ -503,11 +399,12 @@ class KerasConverter {
     // Initialize input layer in Python
     std::ostringstream code;
     if (options_.batch_size > 0) {
-      code << "input_planes = layers.Input(shape=(8, 8, " << kInputPlanes
+      // Input shape matches ONNX format: (channels, height, width) = (112, 8, 8)
+      code << "input_planes = layers.Input(shape=(" << kInputPlanes << ", 8, 8"
            << "), name='" << SanitizeLayerName(options_.input_name) << "', batch_size=" << options_.batch_size << ")";
     } else {
       // For dynamic batch size, omit batch_size parameter (defaults to None)
-      code << "input_planes = layers.Input(shape=(8, 8, " << kInputPlanes
+      code << "input_planes = layers.Input(shape=(" << kInputPlanes << ", 8, 8"
            << "), name='" << SanitizeLayerName(options_.input_name) << "')";
     }
     py_.AppendPython(code.str());
@@ -1884,12 +1781,12 @@ std::string KerasConverter::MakeAttentionPolicy(
   code << "policy_prom = layers.Permute((2, 1), name='policy_prom_transpose1')(policy_prom)";
   py_.AppendPython(code.str());
   
-  // Split along axis=1 into sizes [3, 1] (matching ONNX Split)
+  // Split along axis=1 into sizes [3, 1] using SliceLayer
   code.str("");
-  code << "policy_prom_split_0 = layers.Lambda(lambda x: x[:, :3, :], output_shape=(3, 8), name='policy_prom_split_0')(policy_prom)";
+  code << "policy_prom_split_0 = SliceLayer(start_indices=[0, 0, 0], sizes=[-1, 3, 8], name='policy_prom_split_0')(policy_prom)";
   py_.AppendPython(code.str());
   code.str("");
-  code << "policy_prom_split_1 = layers.Lambda(lambda x: x[:, 3:4, :], output_shape=(1, 8), name='policy_prom_split_1')(policy_prom)";
+  code << "policy_prom_split_1 = SliceLayer(start_indices=[0, 3, 0], sizes=[-1, 1, 8], name='policy_prom_split_1')(policy_prom)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1961,13 +1858,13 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // Gather with axis=1: policy_qk_prom is (batch*64, 67*64), policy_map_int is (1858,)
   // Result: (batch*64, 1858)
-  // Use custom Gather layer
+  // Use custom Gather layer with output name (matching ONNX: /output/policy -> output_policy)
   code.str("");
-  code << "policy_output = Gather(axis=1, name='policy_gather')([policy_qk_prom, policy_map_int])";
+  code << "output_policy = Gather(axis=1, name='output_policy')([policy_qk_prom, policy_map_int])";
   py_.AppendPython(code.str());
   
-  output_vars_.push_back("policy_output");
-  return "policy_output";
+  output_vars_.push_back("output_policy");
+  return "output_policy";
 }
 
 std::string KerasConverter::MakePolicyHead(const MultiHeadWeights& weights,
@@ -2060,8 +1957,9 @@ std::string KerasConverter::MakePolicyHead(const MultiHeadWeights& weights,
     std::string ip_pol_b_var = "policy_ip_b";
     WeightsToNumpyArray(ip_pol_b_var, head.ip_pol_b, {1858});
     
+    // Use output_policy as the layer name directly
     code.str("");
-    code << "policy_dense_layer = layers.Dense(1858, name='policy_dense', use_bias=True)";
+    code << "policy_dense_layer = layers.Dense(1858, name='output_policy', use_bias=True)";
     py_.AppendPython(code.str());
     
     code.str("");
@@ -2074,12 +1972,12 @@ std::string KerasConverter::MakePolicyHead(const MultiHeadWeights& weights,
     py_.AppendPython(code.str());
     
     code.str("");
-    code << "policy_output = policy_dense_layer(policy_flat)";
+    code << "output_policy = policy_dense_layer(policy_flat)";
     py_.AppendPython(code.str());
   }
   
-  output_vars_.push_back("policy_output");
-  return "policy_output";
+  output_vars_.push_back("output_policy");
+  return "output_policy";
 }
 
 std::string KerasConverter::MakeValueHead(const MultiHeadWeights& weights,
@@ -2242,20 +2140,21 @@ std::string KerasConverter::MakeValueHead(const MultiHeadWeights& weights,
   code << "value_output = value_dense2_layer(" << value_flow_var << ")";
   py_.AppendPython(code.str());
   
+  // Use output_wdl as the final layer name directly
   if (wdl) {
     code.str("");
-    code << "value_output = layers.Softmax(name='value_softmax')(" 
+    code << "output_wdl = layers.Softmax(name='output_wdl')(" 
          << "value_output)";
     py_.AppendPython(code.str());
   } else {
     code.str("");
-    code << "value_output = layers.Activation('tanh', name='value_tanh')(" 
+    code << "output_wdl = layers.Activation('tanh', name='output_wdl')(" 
          << "value_output)";
     py_.AppendPython(code.str());
   }
   
-  output_vars_.push_back("value_output");
-  return "value_output";
+  output_vars_.push_back("output_wdl");
+  return "output_wdl";
 }
 
 std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
@@ -2386,12 +2285,13 @@ std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
   code << "mlh_output = mlh_dense2_layer(" << mlh_flow_var << ")";
   py_.AppendPython(code.str());
   
+  // Use output_mlh as the final layer name directly
   code.str("");
-  code << "mlh_output = layers.ReLU(name='mlh_relu')(" << "mlh_output)";
+  code << "output_mlh = layers.ReLU(name='output_mlh')(" << "mlh_output)";
   py_.AppendPython(code.str());
   
-  output_vars_.push_back("mlh_output");
-  return "mlh_output";
+  output_vars_.push_back("output_mlh");
+  return "output_mlh";
 }
 
 void KerasConverter::ConvertToKeras(const std::string& output_path) {
@@ -2399,6 +2299,13 @@ void KerasConverter::ConvertToKeras(const std::string& output_path) {
   
   // Build input layer (already done in constructor)
   current_flow_var_ = options_.input_name;
+  
+  // Transpose input from NCHW (channels first) to NHWC (channels last) format
+  // This matches ONNX converter which does: Transpose {0, 2, 3, 1}
+  // Input: (batch, 112, 8, 8) -> Output: (batch, 8, 8, 112)
+  py_.AppendPython("input_transposed = layers.Permute((2, 3, 1), name='input_transpose')(" + 
+                   current_flow_var_ + ")");
+  current_flow_var_ = "input_transposed";
   
   // Input convolution
   if (NumResBlocks() > 0) {
@@ -2482,9 +2389,9 @@ void KerasConverter::ConvertToKeras(const std::string& output_path) {
     py_.AppendPython(code.str());
   }
   
-  // Save model to .keras format
+  // Save model to .keras format (format is auto-detected from extension)
   code.str("");
-  code << "model.save('" << output_path << "', save_format='keras')";
+  code << "model.save('" << output_path << "')";
   py_.AppendPython(code.str());
 
   // Write Python code to file if requested (for debugging) - before execution
@@ -2500,6 +2407,15 @@ void KerasConverter::ConvertToKeras(const std::string& output_path) {
 
   // Execute the entire accumulated script
   py_.ExecuteAll();
+  
+  // Clean up weights directory if it was auto-generated
+  if (!options_.weights_dir.empty() && options_.cleanup_weights_dir) {
+    try {
+      std::filesystem::remove_all(options_.weights_dir);
+    } catch (const std::exception& e) {
+      std::cerr << "Warning: Failed to clean up weights directory: " << e.what() << std::endl;
+    }
+  }
 }
 
 }  // namespace
