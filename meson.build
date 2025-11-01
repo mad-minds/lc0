@@ -193,6 +193,7 @@ files += [
   'src/neural/onnx/adapters.cc',
   'src/neural/onnx/builder.cc',
   'src/neural/onnx/converter.cc',
+  'src/neural/keras/converter.cc',
   'src/neural/xla/hlo_builder.cc',
   'src/neural/xla/onnx2hlo.cc',
   'src/neural/xla/print_hlo.cc',
@@ -217,6 +218,7 @@ files += [
   'src/tools/benchmark.cc',
   'src/tools/describenet.cc',
   'src/tools/leela2onnx.cc',
+  'src/tools/leela2keras.cc',
   'src/tools/onnx2leela.cc',
   'src/utils/histogram.cc',
   'src/utils/numa.cc',
@@ -230,6 +232,41 @@ files += [
 includes += include_directories('src')
 
 deps += dependency('threads')
+
+# Python dependency for keras converter
+python3_dep = dependency('python3', required: false)
+if not python3_dep.found()
+  error('Python 3 development headers are required for leela2keras. Install python3-dev or python3-devel package.')
+endif
+# For Python embedding, we need to also link the python library
+# Get linker flags from python3-config and add them as link arguments
+# Also extract library directories for rpath
+python3_config = find_program('python3-config', required: false)
+python3_libdirs = []
+if python3_config.found()
+  python3_ldflags = run_command(python3_config, '--ldflags', '--embed', check: false)
+  if python3_ldflags.returncode() != 0
+    python3_ldflags = run_command(python3_config, '--ldflags', check: false)
+  endif
+  if python3_ldflags.returncode() == 0
+    python3_ldflags_str = python3_ldflags.stdout().strip()
+    python3_ldflags_list = python3_ldflags_str.split()
+    # Extract library directories for rpath using Python
+    python3_helper = find_program('python3', required: false)
+    if python3_helper.found()
+      extract_script = 'import sys; flags=sys.argv[1].split(); dirs=[f[2:] for f in flags if len(f)>2 and f.startswith("-L")]; print(":".join(dirs))'
+      extract_result = run_command(python3_helper, '-c', extract_script, python3_ldflags_str, check: false)
+      if extract_result.returncode() == 0 and extract_result.stdout().strip() != ''
+        extracted = extract_result.stdout().strip()
+        # Split colon-separated directories
+        python3_libdirs = extracted.split(':')
+      endif
+    endif
+    # Add the ldflags as link arguments
+    add_project_link_arguments(python3_ldflags_list, language: 'cpp')
+  endif
+endif
+deps += python3_dep
 
 #############################################################################
 ## Platform specific files
@@ -851,8 +888,14 @@ configure_file(output : 'default_backend.h',
 
 if get_option('lc0')
   files += common_files
+  # Add rpath for Python library directories if Python is embedded
+  python3_rpath = []
+  foreach libdir : python3_libdirs
+    python3_rpath += '-Wl,-rpath,' + libdir
+  endforeach
   executable('lc0', 'src/main.cc',
-       files, include_directories: includes, dependencies: deps, install: true)
+       files, include_directories: includes, dependencies: deps,
+       link_args: python3_rpath, install: true)
 endif
 
 #############################################################################

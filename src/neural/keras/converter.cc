@@ -91,6 +91,12 @@ class PythonInterpreter {
     }
   }
 
+  // Helper to append a formatted line (reduces boilerplate with ostringstream)
+  template<typename... Args>
+  void AppendLine(const std::string& format_str) {
+    AppendPython(format_str);
+  }
+
   // Legacy method for immediate execution (only used for initialization now)
   void ExecutePython(const std::string& code) {
     AppendPython(code);
@@ -431,6 +437,15 @@ class KerasConverter {
                                  const std::vector<int>& dims,
                                  const std::vector<int>& transpose_order = {});
 
+  // Helper to create a Dense layer with weights (reduces code duplication)
+  std::string MakeDenseLayer(const std::string& name,
+                            const std::string& input_var,
+                            const std::vector<float>& weights,
+                            const std::vector<float>& biases,
+                            int input_size,
+                            int output_size,
+                            const std::vector<int>& weight_transpose = {1, 0});
+
   // Sanitize layer name for Keras: strip leading "/" and replace other "/" with "_"
   std::string SanitizeLayerName(const std::string& name) const;
 
@@ -480,6 +495,45 @@ std::string KerasConverter::SanitizeLayerName(const std::string& name) const {
     }
   }
   return sanitized;
+}
+
+std::string KerasConverter::MakeDenseLayer(
+    const std::string& name,
+    const std::string& input_var,
+    const std::vector<float>& weights,
+    const std::vector<float>& biases,
+    int input_size,
+    int output_size,
+    const std::vector<int>& weight_transpose) {
+  
+  // Create weight and bias arrays
+  std::string w_var = name + "_w";
+  std::string b_var = name + "_b";
+  
+  WeightsToNumpyArray(w_var, weights, {input_size, output_size}, weight_transpose);
+  WeightsToNumpyArray(b_var, biases, {output_size});
+  
+  // Generate layer code
+  std::ostringstream code;
+  std::string sanitized_name = SanitizeLayerName(name);
+  
+  code << name << "_layer = layers.Dense(" << output_size << ", name='" 
+       << sanitized_name << "', use_bias=True)";
+  py_.AppendPython(code.str());
+  
+  code.str("");
+  code << name << "_layer.build([None, " << input_size << "])";
+  py_.AppendPython(code.str());
+  
+  code.str("");
+  code << name << "_layer.set_weights([" << w_var << ", " << b_var << "])";
+  py_.AppendPython(code.str());
+  
+  code.str("");
+  code << name << " = " << name << "_layer(" << input_var << ")";
+  py_.AppendPython(code.str());
+  
+  return name;
 }
 
 std::string KerasConverter::MakeActivation(const std::string& input_var,
@@ -643,7 +697,8 @@ std::string KerasConverter::MakeSqueezeAndExcite(
   
   // Split into two parts (sigmoid and additive)
   code.str("");
-  code << name << "_split = layers.Lambda(lambda x: ops.split(x, 2, axis=-1), name='" << name << "_split')(" << name << "_reshape)";
+  code << name << "_split = layers.Lambda(lambda x: ops.split(x, 2, axis=-1), output_shape=[(1, 1, " 
+       << NumFilters() << "), (1, 1, " << NumFilters() << ")], name='" << name << "_split')(" << name << "_reshape)";
   py_.AppendPython(code.str());
   code.str("");
   code << name << "_split_0 = " << name << "_split[0]";
@@ -863,7 +918,8 @@ std::string KerasConverter::MakeSmolgen(
   
   code.str("");
   code << name << "_smolgen_compress = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << (64 * smolgen_hidden_channels) << ")), name='"
+       << (64 * smolgen_hidden_channels) << ")), output_shape=(None, " 
+       << (64 * smolgen_hidden_channels) << "), name='"
        << sanitized_name << "_smolgen_compress_reshape')(" << name
        << "_smolgen_compress)";
   py_.AppendPython(code.str());
@@ -949,7 +1005,8 @@ std::string KerasConverter::MakeSmolgen(
   }
   
   code.str("");
-  code << name << "_smolgen_weight_gen = layers.Lambda(lambda x: ops.matmul(x, smolgen_w), name='" << name << "_smolgen_weight_gen')(" << name << "_smolgen_reshape)";
+  code << name << "_smolgen_weight_gen = layers.Lambda(lambda x: ops.matmul(x, smolgen_w), output_shape=(" 
+       << heads << ", 64, 64), name='" << name << "_smolgen_weight_gen')(" << name << "_smolgen_reshape)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1001,12 +1058,13 @@ std::string KerasConverter::MakeEncoderLayer(
   
   code.str("");
   code << name << "_q = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << heads
-       << ", " << depth << ")), name='" << name << "_q_reshape')(" << name
-       << "_q)";
+       << ", " << depth << ")), output_shape=(64, " << heads << ", " << depth 
+       << "), name='" << name << "_q_reshape')(" << name << "_q)";
   py_.AppendPython(code.str());
   
   code.str("");
-  code << name << "_q = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), name='" << name << "_q_transpose')(" << name << "_q)";
+  code << name << "_q = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), output_shape=(" 
+       << heads << ", 64, " << depth << "), name='" << name << "_q_transpose')(" << name << "_q)";
   py_.AppendPython(code.str());
   
   // K
@@ -1035,12 +1093,13 @@ std::string KerasConverter::MakeEncoderLayer(
   
   code.str("");
   code << name << "_k = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << heads
-       << ", " << depth << ")), name='" << name << "_k_reshape')(" << name
-       << "_k)";
+       << ", " << depth << ")), output_shape=(64, " << heads << ", " << depth 
+       << "), name='" << name << "_k_reshape')(" << name << "_k)";
   py_.AppendPython(code.str());
   
   code.str("");
-  code << name << "_k = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 3, 1]), name='" << name << "_k_transpose')(" << name << "_k)";
+  code << name << "_k = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 3, 1]), output_shape=(" 
+       << heads << ", " << depth << ", 64), name='" << name << "_k_transpose')(" << name << "_k)";
   py_.AppendPython(code.str());
   
   // V
@@ -1069,17 +1128,19 @@ std::string KerasConverter::MakeEncoderLayer(
   
   code.str("");
   code << name << "_v = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << heads
-       << ", " << depth << ")), name='" << name << "_v_reshape')(" << name
-       << "_v)";
+       << ", " << depth << ")), output_shape=(64, " << heads << ", " << depth 
+       << "), name='" << name << "_v_reshape')(" << name << "_v)";
   py_.AppendPython(code.str());
   
   code.str("");
-  code << name << "_v = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), name='" << name << "_v_transpose')(" << name << "_v)";
+  code << name << "_v = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), output_shape=(" 
+       << heads << ", 64, " << depth << "), name='" << name << "_v_transpose')(" << name << "_v)";
   py_.AppendPython(code.str());
   
   // QK matmul
   code.str("");
-  code << name << "_qk = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), name='" << name << "_qk_matmul')([" << name << "_q, " << name << "_k])";
+  code << name << "_qk = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), output_shape=(" 
+       << heads << ", 64, 64), name='" << name << "_qk_matmul')([" << name << "_q, " << name << "_k])";
   py_.AppendPython(code.str());
   
   // Scale - use Lambda to multiply by scalar directly
@@ -1087,7 +1148,7 @@ std::string KerasConverter::MakeEncoderLayer(
   
   code.str("");
   code << name << "_qk = layers.Lambda(lambda x: x * " << std::setprecision(9) << std::fixed << scale 
-       << ", name='" << name << "_qk_scale')(" << name << "_qk)";
+       << ", output_shape=(" << heads << ", 64, 64), name='" << name << "_qk_scale')(" << name << "_qk)";
   py_.AppendPython(code.str());
   
   // Add smolgen weights if present
@@ -1107,19 +1168,21 @@ std::string KerasConverter::MakeEncoderLayer(
   
   // QKV matmul
   code.str("");
-  code << name << "_qkv = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), name='" << name << "_qkv_matmul')([" << name << "_qk, " << name << "_v])";
+  code << name << "_qkv = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), output_shape=(" 
+       << heads << ", 64, " << depth << "), name='" << name << "_qkv_matmul')([" << name << "_qk, " << name << "_v])";
   py_.AppendPython(code.str());
   
   // Transpose and reshape if multi-head
   if (heads > 1) {
     code.str("");
-    code << name << "_qkv = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), name='" << name << "_qkv_transpose')(" << name << "_qkv)";
+    code << name << "_qkv = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), output_shape=(64, " 
+         << heads << ", " << depth << "), name='" << name << "_qkv_transpose')(" << name << "_qkv)";
     py_.AppendPython(code.str());
   }
 
   code.str("");
   code << name << "_qkv = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << d_model << ")), name='" << sanitized_name << "_qkv_reshape')("
+       << d_model << ")), output_shape=(None, " << d_model << "), name='" << sanitized_name << "_qkv_reshape')("
        << name << "_qkv)";
   py_.AppendPython(code.str());
   
@@ -1152,7 +1215,7 @@ std::string KerasConverter::MakeEncoderLayer(
   if (alpha != 1.0f) {
     code.str("");
     code << name << "_mha_dense = layers.Lambda(lambda x: x * " << std::setprecision(9) << std::fixed << alpha 
-         << ", name='" << sanitized_name << "_alpha_mul')(" << name << "_mha_dense)";
+         << ", output_shape=(None, " << embedding_size << "), name='" << sanitized_name << "_alpha_mul')(" << name << "_mha_dense)";
     py_.AppendPython(code.str());
   }
   
@@ -1206,20 +1269,14 @@ std::string KerasConverter::AttentionBodyMapEmbedding(const std::string& input) 
   if (options_.batch_size > 0) {
     // Known batch size - expand dims then repeat
     code.str("");
-    code << "pos_encoding_expanded = layers.Lambda(lambda x: ops.repeat(ops.expand_dims(x, axis=0), " << options_.batch_size << ", axis=0), name='pos_encoding_repeat')(" << pos_enc_var << ")";
+    code << "pos_encoding_expanded = layers.Lambda(lambda x: ops.repeat(ops.expand_dims(x, axis=0), " << options_.batch_size << ", axis=0), output_shape=(64, 64), name='pos_encoding_repeat')(" << pos_enc_var << ")";
     py_.AppendPython(code.str());
   } else {
-    // Dynamic batch - use keras.backend to get dynamic shape
+    // Dynamic batch - use one-liner lambda to avoid function definition serialization issues
     code.str("");
-    code << "# Expand position encoding to (1, 64, 64)\n";
-    code << "pos_encoding_3d = ops.expand_dims(" << pos_enc_var << ", axis=0)\n";
-    code << "# Tile based on batch size dynamically using keras.ops\n";
-    code << "def tile_pos_encoding(x):\n";
-    code << "    # x is attn_body_reshape with shape (batch, 64, 112)\n";
-    code << "    batch_size = ops.shape(x)[0]\n";
-    code << "    multiples = ops.stack([batch_size, 1, 1])\n";
-    code << "    return ops.tile(pos_encoding_3d, multiples)\n";
-    code << "pos_encoding_expanded = layers.Lambda(tile_pos_encoding, name='pos_encoding_broadcast')(attn_body_reshape)";
+    code << "# Expand position encoding to (1, 64, 64) and tile dynamically based on batch size\n";
+    code << "# Use one-liner lambda to avoid function definition serialization issues\n";
+    code << "pos_encoding_expanded = layers.Lambda(lambda x: ops.tile(ops.expand_dims(" << pos_enc_var << ", axis=0), ops.concatenate([ops.reshape(ops.shape(x)[0:1], (1,)), ops.array([1, 1])])), output_shape=(64, 64), name='pos_encoding_broadcast')(attn_body_reshape)";
     py_.AppendPython(code.str());
   }
   
@@ -1229,7 +1286,7 @@ std::string KerasConverter::AttentionBodyMapEmbedding(const std::string& input) 
   
   // Reshape from (batch, 64, 176) to (batch*64, 176) by flattening first two dimensions
   code.str("");
-  code << "attn_body_out = layers.Lambda(lambda x: ops.reshape(x, (-1, 176)), name='attn_body_out')(attn_body_padded)";
+  code << "attn_body_out = layers.Lambda(lambda x: ops.reshape(x, (-1, 176)), output_shape=(None, 176), name='attn_body_out')(attn_body_padded)";
   py_.AppendPython(code.str());
   
   return "attn_body_out";
@@ -1249,7 +1306,7 @@ std::string KerasConverter::AttentionBodyDenseEmbedding(
   
   // Slice position info (first 12 channels)
   code.str("");
-  code << "pos_info = layers.Lambda(lambda x: ops.slice(x, [0, 0, 0], [-1, 64, 12]), name='pos_info_slice')(attn_body_reshape)";
+  code << "pos_info = layers.Lambda(lambda x: ops.slice(x, [0, 0, 0], [-1, 64, 12]), output_shape=(64, 12), name='pos_info_slice')(attn_body_reshape)";
   py_.AppendPython(code.str());
   
   // Reshape
@@ -1299,7 +1356,8 @@ std::string KerasConverter::AttentionBodyDenseEmbedding(
   // ONNX Reshape with -1 flattens batch and spatial dimensions: (batch, 64, C) -> (batch*64, C)
   code.str("");
   code << "attn_body_out = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << (112 + embedding_dense_size) << ")), name='attn_body_out')(attn_body_concat)";
+       << (112 + embedding_dense_size) << ")), output_shape=(None, " << (112 + embedding_dense_size) 
+       << "), name='attn_body_out')(attn_body_concat)";
   py_.AppendPython(code.str());
   
   return "attn_body_out";
@@ -1320,7 +1378,7 @@ std::string KerasConverter::MakeAttentionBody(
   
   // Transpose from NCHW to NHWC
   std::ostringstream code;
-  code << "attn_body_transpose = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 3, 1]), name='attn_body_transpose')(" << input << ")";
+  code << "attn_body_transpose = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 3, 1]), output_shape=(8, 8, 112), name='attn_body_transpose')(" << input << ")";
   py_.AppendPython(code.str());
   
   auto input_embedding = src_.format().network_format().input_embedding();
@@ -1332,7 +1390,8 @@ std::string KerasConverter::MakeAttentionBody(
     // Reshape from residual output: (batch, 8, 8, filters) -> (batch*64, filters)
     code.str("");
     code << "attn_body_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-         << NumFilters() << ")), name='attn_body_reshape')(" << flow << ")";
+         << NumFilters() << ")), output_shape=(None, " << NumFilters() 
+         << "), name='attn_body_reshape')(" << flow << ")";
     py_.AppendPython(code.str());
     flow = "attn_body_reshape";
     first_stage_out_C = NumFilters();
@@ -1390,8 +1449,8 @@ std::string KerasConverter::MakeAttentionBody(
     // Reshape from (batch*64, embedding_size) to (batch, 64, embedding_size)
     code.str("");
     code << flow << " = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, "
-         << embedding_size << ")), name='attn_gating_reshape')(" << flow
-         << ")";
+         << embedding_size << ")), output_shape=(64, " << embedding_size 
+         << "), name='attn_gating_reshape')(" << flow << ")";
     py_.AppendPython(code.str());
     
     if (weights.ip_mult_gate.size() > 0) {
@@ -1425,8 +1484,8 @@ std::string KerasConverter::MakeAttentionBody(
     // Reshape back to (batch*64, embedding_size)
     code.str("");
     code << flow << " = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-         << embedding_size << ")), name='attn_gating_reshape_back')(" << flow
-         << ")";
+         << embedding_size << ")), output_shape=(None, " << embedding_size 
+         << "), name='attn_gating_reshape_back')(" << flow << ")";
     py_.AppendPython(code.str());
   }
   
@@ -1555,7 +1614,8 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   code.str("");
   code << "policy_q = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, "
-       << policy_d_model << ")), name='policy_q_reshape')(policy_q)";
+       << policy_d_model << ")), output_shape=(64, " << policy_d_model 
+       << "), name='policy_q_reshape')(policy_q)";
   py_.AppendPython(code.str());
   
   // K projection
@@ -1586,7 +1646,8 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   code.str("");
   code << "policy_k = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, "
-       << policy_d_model << ")), name='policy_k_reshape')(policy_k)";
+       << policy_d_model << ")), output_shape=(64, " << policy_d_model 
+       << "), name='policy_k_reshape')(policy_k)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1595,7 +1656,7 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // QK matmul
   code.str("");
-  code << "policy_qk = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), name='policy_qk_matmul')([policy_q, policy_k])";
+  code << "policy_qk = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), output_shape=(64, 64), name='policy_qk_matmul')([policy_q, policy_k])";
   py_.AppendPython(code.str());
   
   // Scale - use Lambda to multiply by scalar directly
@@ -1603,13 +1664,13 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   code.str("");
   code << "policy_qk = layers.Lambda(lambda x: x * " << std::setprecision(9) << std::fixed << scale 
-       << ", name='policy_qk_scale')(policy_qk)";
+       << ", output_shape=(64, 64), name='policy_qk_scale')(policy_qk)";
   py_.AppendPython(code.str());
   
   // Promotion handling
   code.str("");
   code << "policy_prom_slice = layers.Lambda(lambda x: ops.slice(x, [0, 56, 0], [-1, 8, " 
-       << policy_d_model << "]), name='policy_prom_slice')(policy_k)";
+       << policy_d_model << "]), output_shape=(" << policy_d_model << ", 8), name='policy_prom_slice')(policy_k)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1619,7 +1680,8 @@ std::string KerasConverter::MakeAttentionPolicy(
   // Reshape from (batch, policy_d_model, 8) to (batch*8, policy_d_model)
   code.str("");
   code << "policy_prom_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << policy_d_model << ")), name='policy_prom_reshape')(policy_prom_slice)";
+       << policy_d_model << ")), output_shape=(None, " << policy_d_model 
+       << "), name='policy_prom_reshape')(policy_prom_slice)";
   py_.AppendPython(code.str());
   
   std::string ip4_pol_w_var = "policy_ip4_pol_w";
@@ -1644,7 +1706,7 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // Reshape from (batch*8, 4) to (batch, 8, 4) before transpose
   code.str("");
-  code << "policy_prom = layers.Lambda(lambda x: ops.reshape(x, (-1, 8, 4)), name='policy_prom_reshape_3d')(policy_prom)";
+  code << "policy_prom = layers.Lambda(lambda x: ops.reshape(x, (-1, 8, 4)), output_shape=(8, 4), name='policy_prom_reshape_3d')(policy_prom)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1653,10 +1715,10 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // Split along axis=1 into sizes [3, 1] (matching ONNX Split)
   code.str("");
-  code << "policy_prom_split_0 = layers.Lambda(lambda x: x[:, :3, :], name='policy_prom_split_0')(policy_prom)";
+  code << "policy_prom_split_0 = layers.Lambda(lambda x: x[:, :3, :], output_shape=(3, 8), name='policy_prom_split_0')(policy_prom)";
   py_.AppendPython(code.str());
   code.str("");
-  code << "policy_prom_split_1 = layers.Lambda(lambda x: x[:, 3:4, :], name='policy_prom_split_1')(policy_prom)";
+  code << "policy_prom_split_1 = layers.Lambda(lambda x: x[:, 3:4, :], output_shape=(1, 8), name='policy_prom_split_1')(policy_prom)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1674,15 +1736,15 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // Promotion slice from qk
   code.str("");
-  code << "policy_qk_slice = layers.Lambda(lambda x: ops.slice(x, [0, 48, 56], [-1, 8, 8]), name='policy_qk_slice')(policy_qk)";
+  code << "policy_qk_slice = layers.Lambda(lambda x: ops.slice(x, [0, 48, 56], [-1, 8, 8]), output_shape=(8, 8), name='policy_qk_slice')(policy_qk)";
   py_.AppendPython(code.str());
   
   code.str("");
-  code << "policy_qk_slice = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, 1)), name='policy_qk_slice_reshape')(policy_qk_slice)";
+  code << "policy_qk_slice = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, 1)), output_shape=(64, 1), name='policy_qk_slice_reshape')(policy_qk_slice)";
   py_.AppendPython(code.str());
   
   code.str("");
-  code << "policy_qk_slice = layers.Lambda(lambda x: ops.repeat(x, 3, axis=-1), name='policy_qk_slice_repeat')(policy_qk_slice)";
+  code << "policy_qk_slice = layers.Lambda(lambda x: ops.repeat(x, 3, axis=-1), output_shape=(64, 3), name='policy_qk_slice_repeat')(policy_qk_slice)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1707,7 +1769,7 @@ std::string KerasConverter::MakeAttentionPolicy(
   // Reshape to (batch*64, 67*64) like ONNX does before gather
   // policy_qk_prom is (batch*64, 67, 64) after concat, need to flatten last two dims
   code.str("");
-  code << "policy_qk_prom = layers.Lambda(lambda x: ops.reshape(x, (-1, 67 * 64)), name='policy_qk_prom_reshape')(policy_qk_prom)";
+  code << "policy_qk_prom = layers.Lambda(lambda x: ops.reshape(x, (-1, 67 * 64)), output_shape=(None, 67 * 64), name='policy_qk_prom_reshape')(policy_qk_prom)";
   py_.AppendPython(code.str());
   
   // Create policy mapping and convert to TensorFlow constant
@@ -1794,7 +1856,8 @@ std::string KerasConverter::MakePolicyHead(const MultiHeadWeights& weights,
     // Reshape to (batch*64, conv_size*8*8) before gather (like ONNX does)
     code.str("");
     code << "policy_flat_reshaped = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-         << (head.policy.biases.size() * 8 * 8) << ")), name='policy_flat_reshaped')(policy_flat)";
+         << (head.policy.biases.size() * 8 * 8) << ")), output_shape=(None, " 
+         << (head.policy.biases.size() * 8 * 8) << "), name='policy_flat_reshaped')(policy_flat)";
     py_.AppendPython(code.str());
     
     // Gather with axis=1 using keras.ops.gather
@@ -1896,7 +1959,7 @@ std::string KerasConverter::MakeValueHead(const MultiHeadWeights& weights,
     
     // Reshape from (batch*64, val_channels) to (batch, 64, val_channels) then to (batch, val_channels*8*8)
     code.str("");
-    code << "value_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << val_channels << ")), name='value_reshape_3d')(" << value_embed_act << ")";
+    code << "value_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << val_channels << ")), output_shape=(64, " << val_channels << "), name='value_reshape_3d')(" << value_embed_act << ")";
     py_.AppendPython(code.str());
     
     code.str("");
@@ -2065,7 +2128,7 @@ std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
     
     // Reshape from (batch*64, mlh_channels) to (batch, 64, mlh_channels) then to (batch, mlh_channels*8*8)
     code.str("");
-    code << "mlh_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << mlh_channels << ")), name='mlh_reshape_3d')(" << mlh_embed_act << ")";
+    code << "mlh_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << mlh_channels << ")), output_shape=(64, " << mlh_channels << "), name='mlh_reshape_3d')(" << mlh_embed_act << ")";
     py_.AppendPython(code.str());
     
     code.str("");
