@@ -66,14 +66,170 @@ class PythonInterpreter {
     script_ << "from tensorflow.keras import layers\n";
     script_ << "from keras import ops\n";
     script_ << "import numpy as np\n";
+    script_ << "import keras as keras_core\n";
+    script_ << "\n";
     
-    // Also add imports to code_log_ if tracking
+    // Add custom serializable layers for operations without native Keras equivalents
+    script_ << "# Custom serializable layers for operations that don't have native Keras equivalents\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class MatMul(layers.Layer):\n";
+    script_ << "    \"\"\"Matrix multiplication layer that properly serializes.\"\"\"\n";
+    script_ << "    def __init__(self, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        return ops.matmul(inputs[0], inputs[1])\n";
+    script_ << "    \n";
+    script_ << "    def compute_output_shape(self, input_shapes):\n";
+    script_ << "        # Batch matmul: (..., m, k) x (..., k, n) -> (..., m, n)\n";
+    script_ << "        return input_shapes[0][:-1] + (input_shapes[1][-1],)\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class Gather(layers.Layer):\n";
+    script_ << "    \"\"\"Gather layer with axis parameter.\"\"\"\n";
+    script_ << "    def __init__(self, axis=0, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "        self.axis = axis\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        # keras.ops.gather doesn't exist, use ops.take_along_axis or tf.gather\n";
+    script_ << "        import tensorflow as tf\n";
+    script_ << "        return tf.gather(inputs[0], inputs[1], axis=self.axis)\n";
+    script_ << "    \n";
+    script_ << "    def compute_output_shape(self, input_shapes):\n";
+    script_ << "        # Gathering along axis, indices shape replaces that dimension\n";
+    script_ << "        if self.axis == 1:\n";
+    script_ << "            return (input_shapes[0][0], input_shapes[1][0])\n";
+    script_ << "        return input_shapes[0]\n";
+    script_ << "    \n";
+    script_ << "    def get_config(self):\n";
+    script_ << "        config = super().get_config()\n";
+    script_ << "        config['axis'] = self.axis\n";
+    script_ << "        return config\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class DynamicTile(layers.Layer):\n";
+    script_ << "    \"\"\"Tile layer that handles dynamic batch size.\"\"\"\n";
+    script_ << "    def __init__(self, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        # inputs[0] is the reference tensor for batch size\n";
+    script_ << "        # inputs[1] is the tensor to tile (must be shape-compatible)\n";
+    script_ << "        batch_size = ops.shape(inputs[0])[0:1]\n";
+    script_ << "        expanded = ops.expand_dims(inputs[1], axis=0)\n";
+    script_ << "        repeats = ops.concatenate([ops.reshape(batch_size, (1,)), ops.array([1, 1])])\n";
+    script_ << "        return ops.tile(expanded, repeats)\n";
+    script_ << "    \n";
+    script_ << "    def compute_output_shape(self, input_shapes):\n";
+    script_ << "        # Output shape: (batch, *input_shapes[1])\n";
+    script_ << "        return (input_shapes[0][0],) + input_shapes[1]\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class StaticRepeat(layers.Layer):\n";
+    script_ << "    \"\"\"Repeat layer with fixed repetition count.\"\"\"\n";
+    script_ << "    def __init__(self, repeats, axis=0, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "        self.repeats = repeats\n";
+    script_ << "        self.axis = axis\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        expanded = ops.expand_dims(inputs, axis=self.axis)\n";
+    script_ << "        return ops.repeat(expanded, self.repeats, axis=self.axis)\n";
+    script_ << "    \n";
+    script_ << "    def get_config(self):\n";
+    script_ << "        config = super().get_config()\n";
+    script_ << "        config['repeats'] = self.repeats\n";
+    script_ << "        config['axis'] = self.axis\n";
+    script_ << "        return config\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class SliceLayer(layers.Layer):\n";
+    script_ << "    \"\"\"Slice layer with start and size parameters.\"\"\"\n";
+    script_ << "    def __init__(self, start_indices, sizes, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "        self.start_indices = start_indices\n";
+    script_ << "        self.sizes = sizes\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        return ops.slice(inputs, self.start_indices, self.sizes)\n";
+    script_ << "    \n";
+    script_ << "    def get_config(self):\n";
+    script_ << "        config = super().get_config()\n";
+    script_ << "        config['start_indices'] = self.start_indices\n";
+    script_ << "        config['sizes'] = self.sizes\n";
+    script_ << "        return config\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class FlattenBatchSpatial(layers.Layer):\n";
+    script_ << "    \"\"\"Flatten batch and spatial dimensions: (batch, 64, C) -> (batch*64, C).\"\"\"\n";
+    script_ << "    def __init__(self, channels, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "        self.channels = channels\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        return ops.reshape(inputs, (-1, self.channels))\n";
+    script_ << "    \n";
+    script_ << "    def compute_output_shape(self, input_shape):\n";
+    script_ << "        return (None, self.channels)\n";
+    script_ << "    \n";
+    script_ << "    def get_config(self):\n";
+    script_ << "        config = super().get_config()\n";
+    script_ << "        config['channels'] = self.channels\n";
+    script_ << "        return config\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class UnflattenBatchSpatial(layers.Layer):\n";
+    script_ << "    \"\"\"Unflatten batch and spatial dimensions: (batch*64, C) -> (batch, 64, C).\"\"\"\n";
+    script_ << "    def __init__(self, channels, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "        self.channels = channels\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        return ops.reshape(inputs, (-1, 64, self.channels))\n";
+    script_ << "    \n";
+    script_ << "    def compute_output_shape(self, input_shape):\n";
+    script_ << "        return (None, 64, self.channels)\n";
+    script_ << "    \n";
+    script_ << "    def get_config(self):\n";
+    script_ << "        config = super().get_config()\n";
+    script_ << "        config['channels'] = self.channels\n";
+    script_ << "        return config\n";
+    script_ << "\n";
+    script_ << "@keras_core.saving.register_keras_serializable()\n";
+    script_ << "class DynamicReshape(layers.Layer):\n";
+    script_ << "    \"\"\"Dynamic reshape with -1 for automatic dimension inference.\"\"\"\n";
+    script_ << "    def __init__(self, target_shape, output_shape_tuple, **kwargs):\n";
+    script_ << "        super().__init__(**kwargs)\n";
+    script_ << "        self.target_shape = target_shape  # tuple with -1 for auto dim\n";
+    script_ << "        self.output_shape_tuple = output_shape_tuple  # for compute_output_shape\n";
+    script_ << "    \n";
+    script_ << "    def call(self, inputs):\n";
+    script_ << "        return ops.reshape(inputs, self.target_shape)\n";
+    script_ << "    \n";
+    script_ << "    def compute_output_shape(self, input_shape):\n";
+    script_ << "        return self.output_shape_tuple\n";
+    script_ << "    \n";
+    script_ << "    def get_config(self):\n";
+    script_ << "        config = super().get_config()\n";
+    script_ << "        config['target_shape'] = self.target_shape\n";
+    script_ << "        config['output_shape_tuple'] = self.output_shape_tuple\n";
+    script_ << "        return config\n";
+    script_ << "\n";
+    
+    // Also add all imports and custom classes to code_log_ if tracking
     if (track_code_) {
       code_log_ += "import tensorflow as tf\n";
       code_log_ += "from tensorflow import keras\n";
       code_log_ += "from tensorflow.keras import layers\n";
       code_log_ += "from keras import ops\n";
       code_log_ += "import numpy as np\n";
+      code_log_ += "import keras as keras_core\n";
+      code_log_ += "\n";
+      code_log_ += "# Custom serializable layers for operations that don't have native Keras equivalents\n";
+      // Add all the custom layer definitions to code_log
+      // Copy the entire custom layer definition block
+      code_log_ += script_.str();
     }
   }
 
@@ -695,10 +851,18 @@ std::string KerasConverter::MakeSqueezeAndExcite(
        << "), name='" << name << "_reshape')(" << name << "_dense2)";
   py_.AppendPython(code.str());
   
-  // Split into two parts (sigmoid and additive)
+  // Split into two parts (sigmoid and additive) - use slicing instead of Lambda
+  int half_filters = NumFilters();
   code.str("");
-  code << name << "_split = layers.Lambda(lambda x: ops.split(x, 2, axis=-1), output_shape=[(1, 1, " 
-       << NumFilters() << "), (1, 1, " << NumFilters() << ")], name='" << name << "_split')(" << name << "_reshape)";
+  code << name << "_split_0 = " << name << "_reshape[:, :, :, :" << half_filters << "]";
+  py_.AppendPython(code.str());
+  
+  code.str("");
+  code << name << "_split_1 = " << name << "_reshape[:, :, :, " << half_filters << ":]";
+  py_.AppendPython(code.str());
+  
+  code.str("");
+  code << name << "_split = [" << name << "_split_0, " << name << "_split_1]";
   py_.AppendPython(code.str());
   code.str("");
   code << name << "_split_0 = " << name << "_split[0]";
@@ -916,9 +1080,10 @@ std::string KerasConverter::MakeSmolgen(
        << encoder_in << ")";
   py_.AppendPython(code.str());
   
+  // Use DynamicReshape for flattening with dynamic batch
   code.str("");
-  code << name << "_smolgen_compress = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << (64 * smolgen_hidden_channels) << ")), output_shape=(None, " 
+  code << name << "_smolgen_compress = DynamicReshape(target_shape=(-1, " 
+       << (64 * smolgen_hidden_channels) << "), output_shape_tuple=(None, " 
        << (64 * smolgen_hidden_channels) << "), name='"
        << sanitized_name << "_smolgen_compress_reshape')(" << name
        << "_smolgen_compress)";
@@ -989,9 +1154,10 @@ std::string KerasConverter::MakeSmolgen(
                                       layer.mha.smolgen.ln2_gammas,
                                       layer.mha.smolgen.ln2_betas, 1e-3f);
   
-  // Reshape and multiply with smolgen weights
+  // Reshape and multiply with smolgen weights - use DynamicReshape for dynamic batch
   code.str("");
-  code << name << "_smolgen_reshape = layers.Reshape((" << heads << ", " 
+  code << name << "_smolgen_reshape = DynamicReshape(target_shape=(-1, " << heads << ", " 
+       << smolgen_gen_sz << "), output_shape_tuple=(None, " << heads << ", " 
        << smolgen_gen_sz << "), name='" << sanitized_name << "_smolgen_reshape')(" << ln2_out << ")";
   py_.AppendPython(code.str());
   
@@ -1004,9 +1170,9 @@ std::string KerasConverter::MakeSmolgen(
     smolgen_w_created_ = true;
   }
   
+  // Use custom MatMul layer instead of Lambda
   code.str("");
-  code << name << "_smolgen_weight_gen = layers.Lambda(lambda x: ops.matmul(x, smolgen_w), output_shape=(" 
-       << heads << ", 64, 64), name='" << name << "_smolgen_weight_gen')(" << name << "_smolgen_reshape)";
+  code << name << "_smolgen_weight_gen = MatMul(name='" << name << "_smolgen_weight_gen')([" << name << "_smolgen_reshape, smolgen_w])";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1056,15 +1222,16 @@ std::string KerasConverter::MakeEncoderLayer(
   code << name << "_q = " << name << "_q_layer(" << encoder_in << ")";
   py_.AppendPython(code.str());
   
+  // Use DynamicReshape for reshaping with dynamic batch
   code.str("");
-  code << name << "_q = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << heads
-       << ", " << depth << ")), output_shape=(64, " << heads << ", " << depth 
+  code << name << "_q = DynamicReshape(target_shape=(-1, 64, " << heads << ", " << depth 
+       << "), output_shape_tuple=(None, 64, " << heads << ", " << depth 
        << "), name='" << name << "_q_reshape')(" << name << "_q)";
   py_.AppendPython(code.str());
   
+  // Use Permute for transpose: [0, 2, 1, 3] -> (2, 1, 3) in 1-indexed
   code.str("");
-  code << name << "_q = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), output_shape=(" 
-       << heads << ", 64, " << depth << "), name='" << name << "_q_transpose')(" << name << "_q)";
+  code << name << "_q = layers.Permute((2, 1, 3), name='" << name << "_q_transpose')(" << name << "_q)";
   py_.AppendPython(code.str());
   
   // K
@@ -1091,15 +1258,16 @@ std::string KerasConverter::MakeEncoderLayer(
   code << name << "_k = " << name << "_k_layer(" << encoder_in << ")";
   py_.AppendPython(code.str());
   
+  // Use DynamicReshape for reshaping with dynamic batch
   code.str("");
-  code << name << "_k = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << heads
-       << ", " << depth << ")), output_shape=(64, " << heads << ", " << depth 
+  code << name << "_k = DynamicReshape(target_shape=(-1, 64, " << heads << ", " << depth 
+       << "), output_shape_tuple=(None, 64, " << heads << ", " << depth 
        << "), name='" << name << "_k_reshape')(" << name << "_k)";
   py_.AppendPython(code.str());
   
+  // Use Permute for transpose: [0, 2, 3, 1] -> (2, 3, 1) in 1-indexed
   code.str("");
-  code << name << "_k = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 3, 1]), output_shape=(" 
-       << heads << ", " << depth << ", 64), name='" << name << "_k_transpose')(" << name << "_k)";
+  code << name << "_k = layers.Permute((2, 3, 1), name='" << name << "_k_transpose')(" << name << "_k)";
   py_.AppendPython(code.str());
   
   // V
@@ -1126,29 +1294,29 @@ std::string KerasConverter::MakeEncoderLayer(
   code << name << "_v = " << name << "_v_layer(" << encoder_in << ")";
   py_.AppendPython(code.str());
   
+  // Use DynamicReshape for reshaping with dynamic batch
   code.str("");
-  code << name << "_v = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << heads
-       << ", " << depth << ")), output_shape=(64, " << heads << ", " << depth 
+  code << name << "_v = DynamicReshape(target_shape=(-1, 64, " << heads << ", " << depth 
+       << "), output_shape_tuple=(None, 64, " << heads << ", " << depth 
        << "), name='" << name << "_v_reshape')(" << name << "_v)";
   py_.AppendPython(code.str());
   
+  // Use Permute for transpose: [0, 2, 1, 3] -> (2, 1, 3) in 1-indexed
   code.str("");
-  code << name << "_v = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), output_shape=(" 
-       << heads << ", 64, " << depth << "), name='" << name << "_v_transpose')(" << name << "_v)";
+  code << name << "_v = layers.Permute((2, 1, 3), name='" << name << "_v_transpose')(" << name << "_v)";
   py_.AppendPython(code.str());
   
-  // QK matmul
+  // QK matmul - use custom MatMul layer
   code.str("");
-  code << name << "_qk = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), output_shape=(" 
-       << heads << ", 64, 64), name='" << name << "_qk_matmul')([" << name << "_q, " << name << "_k])";
+  code << name << "_qk = MatMul(name='" << name << "_qk_matmul')([" << name << "_q, " << name << "_k])";
   py_.AppendPython(code.str());
   
-  // Scale - use Lambda to multiply by scalar directly
+  // Scale - use Rescaling layer for scalar multiplication
   float scale = 1.0f / sqrtf(static_cast<float>(depth));
   
   code.str("");
-  code << name << "_qk = layers.Lambda(lambda x: x * " << std::setprecision(9) << std::fixed << scale 
-       << ", output_shape=(" << heads << ", 64, 64), name='" << name << "_qk_scale')(" << name << "_qk)";
+  code << name << "_qk = layers.Rescaling(scale=" << std::setprecision(9) << std::fixed << scale 
+       << ", name='" << name << "_qk_scale')(" << name << "_qk)";
   py_.AppendPython(code.str());
   
   // Add smolgen weights if present
@@ -1166,23 +1334,24 @@ std::string KerasConverter::MakeEncoderLayer(
        << name << "_qk)";
   py_.AppendPython(code.str());
   
-  // QKV matmul
+  // QKV matmul - use custom MatMul layer
   code.str("");
-  code << name << "_qkv = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), output_shape=(" 
-       << heads << ", 64, " << depth << "), name='" << name << "_qkv_matmul')([" << name << "_qk, " << name << "_v])";
+  code << name << "_qkv = MatMul(name='" << name << "_qkv_matmul')([" << name << "_qk, " << name << "_v])";
   py_.AppendPython(code.str());
   
   // Transpose and reshape if multi-head
   if (heads > 1) {
+    // Use Permute for transpose: [0, 2, 1, 3] -> (2, 1, 3) in 1-indexed
     code.str("");
-    code << name << "_qkv = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 1, 3]), output_shape=(64, " 
-         << heads << ", " << depth << "), name='" << name << "_qkv_transpose')(" << name << "_qkv)";
+    code << name << "_qkv = layers.Permute((2, 1, 3), name='" << name << "_qkv_transpose')(" << name << "_qkv)";
     py_.AppendPython(code.str());
   }
 
+  // Use DynamicReshape for flattening with dynamic batch
   code.str("");
-  code << name << "_qkv = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << d_model << ")), output_shape=(None, " << d_model << "), name='" << sanitized_name << "_qkv_reshape')("
+  code << name << "_qkv = DynamicReshape(target_shape=(-1, "
+       << d_model << "), output_shape_tuple=(None, " << d_model 
+       << "), name='" << sanitized_name << "_qkv_reshape')("
        << name << "_qkv)";
   py_.AppendPython(code.str());
   
@@ -1213,9 +1382,10 @@ std::string KerasConverter::MakeEncoderLayer(
   
   // Apply alpha scaling if needed
   if (alpha != 1.0f) {
+    // Use Rescaling layer for alpha multiplication
     code.str("");
-    code << name << "_mha_dense = layers.Lambda(lambda x: x * " << std::setprecision(9) << std::fixed << alpha 
-         << ", output_shape=(None, " << embedding_size << "), name='" << sanitized_name << "_alpha_mul')(" << name << "_mha_dense)";
+    code << name << "_mha_dense = layers.Rescaling(scale=" << std::setprecision(9) << std::fixed << alpha 
+         << ", name='" << sanitized_name << "_alpha_mul')(" << name << "_mha_dense)";
     py_.AppendPython(code.str());
   }
   
@@ -1247,9 +1417,9 @@ std::string KerasConverter::MakeEncoderLayer(
 }
 
 std::string KerasConverter::AttentionBodyMapEmbedding(const std::string& input) {
-  // Reshape to (batch, 64, 112)
+  // Reshape to (batch, 64, 112) - use DynamicReshape for dynamic batch
   std::ostringstream code;
-  code << "attn_body_reshape = layers.Reshape((64, 112), name='attn_body_reshape')(" 
+  code << "attn_body_reshape = DynamicReshape(target_shape=(-1, 64, 112), output_shape_tuple=(None, 64, 112), name='attn_body_reshape')(" 
        << input << ")";
   py_.AppendPython(code.str());
   
@@ -1267,16 +1437,15 @@ std::string KerasConverter::AttentionBodyMapEmbedding(const std::string& input) 
   py_.CreateNumpyArray(pos_enc_var, pos_encoding, {64, 64});  // Save as (64, 64) instead of (1, 64, 64)
   
   if (options_.batch_size > 0) {
-    // Known batch size - expand dims then repeat
+    // Known batch size - use custom StaticRepeat layer
     code.str("");
-    code << "pos_encoding_expanded = layers.Lambda(lambda x: ops.repeat(ops.expand_dims(x, axis=0), " << options_.batch_size << ", axis=0), output_shape=(64, 64), name='pos_encoding_repeat')(" << pos_enc_var << ")";
+    code << "pos_encoding_expanded = StaticRepeat(repeats=" << options_.batch_size << ", axis=0, name='pos_encoding_repeat')(" << pos_enc_var << ")";
     py_.AppendPython(code.str());
   } else {
-    // Dynamic batch - use one-liner lambda to avoid function definition serialization issues
+    // Dynamic batch - use custom DynamicTile layer
     code.str("");
-    code << "# Expand position encoding to (1, 64, 64) and tile dynamically based on batch size\n";
-    code << "# Use one-liner lambda to avoid function definition serialization issues\n";
-    code << "pos_encoding_expanded = layers.Lambda(lambda x: ops.tile(ops.expand_dims(" << pos_enc_var << ", axis=0), ops.concatenate([ops.reshape(ops.shape(x)[0:1], (1,)), ops.array([1, 1])])), output_shape=(64, 64), name='pos_encoding_broadcast')(attn_body_reshape)";
+    code << "# Expand position encoding dynamically based on batch size\n";
+    code << "pos_encoding_expanded = DynamicTile(name='pos_encoding_broadcast')([attn_body_reshape, " << pos_enc_var << "])";
     py_.AppendPython(code.str());
   }
   
@@ -1286,7 +1455,7 @@ std::string KerasConverter::AttentionBodyMapEmbedding(const std::string& input) 
   
   // Reshape from (batch, 64, 176) to (batch*64, 176) by flattening first two dimensions
   code.str("");
-  code << "attn_body_out = layers.Lambda(lambda x: ops.reshape(x, (-1, 176)), output_shape=(None, 176), name='attn_body_out')(attn_body_padded)";
+  code << "attn_body_out = FlattenBatchSpatial(176, name='attn_body_out')(attn_body_padded)";
   py_.AppendPython(code.str());
   
   return "attn_body_out";
@@ -1299,14 +1468,14 @@ std::string KerasConverter::AttentionBodyDenseEmbedding(
   
   std::ostringstream code;
   
-  // Reshape to (batch, 64, 112)
-  code << "attn_body_reshape = layers.Reshape((64, 112), name='attn_body_reshape')(" 
+  // Reshape to (batch, 64, 112) - use DynamicReshape for dynamic batch
+  code << "attn_body_reshape = DynamicReshape(target_shape=(-1, 64, 112), output_shape_tuple=(None, 64, 112), name='attn_body_reshape')(" 
        << input << ")";
   py_.AppendPython(code.str());
   
-  // Slice position info (first 12 channels)
+  // Slice position info (first 12 channels) - use custom SliceLayer
   code.str("");
-  code << "pos_info = layers.Lambda(lambda x: ops.slice(x, [0, 0, 0], [-1, 64, 12]), output_shape=(64, 12), name='pos_info_slice')(attn_body_reshape)";
+  code << "pos_info = SliceLayer(start_indices=[0, 0, 0], sizes=[-1, 64, 12], name='pos_info_slice')(attn_body_reshape)";
   py_.AppendPython(code.str());
   
   // Reshape
@@ -1355,9 +1524,8 @@ std::string KerasConverter::AttentionBodyDenseEmbedding(
   // Reshape to (batch*64, 112 + embedding_dense_size)
   // ONNX Reshape with -1 flattens batch and spatial dimensions: (batch, 64, C) -> (batch*64, C)
   code.str("");
-  code << "attn_body_out = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << (112 + embedding_dense_size) << ")), output_shape=(None, " << (112 + embedding_dense_size) 
-       << "), name='attn_body_out')(attn_body_concat)";
+  code << "attn_body_out = FlattenBatchSpatial(" << (112 + embedding_dense_size) 
+       << ", name='attn_body_out')(attn_body_concat)";
   py_.AppendPython(code.str());
   
   return "attn_body_out";
@@ -1376,9 +1544,10 @@ std::string KerasConverter::MakeAttentionBody(
     smolgen_w_created_ = true;
   }
   
-  // Transpose from NCHW to NHWC
+  // Transpose from NCHW to NHWC using Permute (1-indexed, batch dim excluded)
+  // ops.transpose(x, [0, 2, 3, 1]) -> Permute([2, 3, 1])
   std::ostringstream code;
-  code << "attn_body_transpose = layers.Lambda(lambda x: ops.transpose(x, [0, 2, 3, 1]), output_shape=(8, 8, 112), name='attn_body_transpose')(" << input << ")";
+  code << "attn_body_transpose = layers.Permute((2, 3, 1), name='attn_body_transpose')(" << input << ")";
   py_.AppendPython(code.str());
   
   auto input_embedding = src_.format().network_format().input_embedding();
@@ -1389,9 +1558,8 @@ std::string KerasConverter::MakeAttentionBody(
   if (NumResBlocks() > 0) {
     // Reshape from residual output: (batch, 8, 8, filters) -> (batch*64, filters)
     code.str("");
-    code << "attn_body_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-         << NumFilters() << ")), output_shape=(None, " << NumFilters() 
-         << "), name='attn_body_reshape')(" << flow << ")";
+    code << "attn_body_reshape = FlattenBatchSpatial(" << NumFilters() 
+         << ", name='attn_body_reshape')(" << flow << ")";
     py_.AppendPython(code.str());
     flow = "attn_body_reshape";
     first_stage_out_C = NumFilters();
@@ -1448,17 +1616,17 @@ std::string KerasConverter::MakeAttentionBody(
   if (weights.ip_mult_gate.size() > 0 || weights.ip_add_gate.size() > 0) {
     // Reshape from (batch*64, embedding_size) to (batch, 64, embedding_size)
     code.str("");
-    code << flow << " = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, "
-         << embedding_size << ")), output_shape=(64, " << embedding_size 
-         << "), name='attn_gating_reshape')(" << flow << ")";
+    code << flow << " = UnflattenBatchSpatial(" << embedding_size 
+         << ", name='attn_gating_reshape')(" << flow << ")";
     py_.AppendPython(code.str());
     
     if (weights.ip_mult_gate.size() > 0) {
       std::string mult_gate_var = "attn_mult_gate";
       WeightsToNumpyArray(mult_gate_var, weights.ip_mult_gate, {64, embedding_size}, {1, 0});
       
+      // Expand dims to (1, 64, embedding_size) for proper broadcasting with (batch, 64, embedding_size)
       code.str("");
-      code << "attn_mult_gate_const = " << mult_gate_var;
+      code << "attn_mult_gate_const = ops.expand_dims(" << mult_gate_var << ", axis=0)";
       py_.AppendPython(code.str());
       
       code.str("");
@@ -1471,8 +1639,9 @@ std::string KerasConverter::MakeAttentionBody(
       std::string add_gate_var = "attn_add_gate";
       WeightsToNumpyArray(add_gate_var, weights.ip_add_gate, {64, embedding_size}, {1, 0});
       
+      // Expand dims to (1, 64, embedding_size) for proper broadcasting with (batch, 64, embedding_size)
       code.str("");
-      code << "attn_add_gate_const = " << add_gate_var;
+      code << "attn_add_gate_const = ops.expand_dims(" << add_gate_var << ", axis=0)";
       py_.AppendPython(code.str());
       
       code.str("");
@@ -1483,9 +1652,8 @@ std::string KerasConverter::MakeAttentionBody(
     
     // Reshape back to (batch*64, embedding_size)
     code.str("");
-    code << flow << " = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-         << embedding_size << ")), output_shape=(None, " << embedding_size 
-         << "), name='attn_gating_reshape_back')(" << flow << ")";
+    code << flow << " = FlattenBatchSpatial(" << embedding_size 
+         << ", name='attn_gating_reshape_back')(" << flow << ")";
     py_.AppendPython(code.str());
   }
   
@@ -1612,10 +1780,10 @@ std::string KerasConverter::MakeAttentionPolicy(
   code << "policy_q = policy_q_layer(" << encoder_out << ")";
   py_.AppendPython(code.str());
   
+  // Use UnflattenBatchSpatial for dynamic batch unflattening
   code.str("");
-  code << "policy_q = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, "
-       << policy_d_model << ")), output_shape=(64, " << policy_d_model 
-       << "), name='policy_q_reshape')(policy_q)";
+  code << "policy_q = UnflattenBatchSpatial(" << policy_d_model 
+       << ", name='policy_q_reshape')(policy_q)";
   py_.AppendPython(code.str());
   
   // K projection
@@ -1644,33 +1812,36 @@ std::string KerasConverter::MakeAttentionPolicy(
   code << "policy_k = policy_k_layer(" << encoder_out << ")";
   py_.AppendPython(code.str());
   
+  // Use UnflattenBatchSpatial for dynamic batch unflattening
   code.str("");
-  code << "policy_k = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, "
-       << policy_d_model << ")), output_shape=(64, " << policy_d_model 
-       << "), name='policy_k_reshape')(policy_k)";
+  code << "policy_k = UnflattenBatchSpatial(" << policy_d_model 
+       << ", name='policy_k_reshape')(policy_k)";
   py_.AppendPython(code.str());
   
+  // Promotion handling - slice from K before transpose
+  // Slice from (batch, 64, policy_d_model) at [0, 56, 0] with sizes [-1, 8, policy_d_model]
+  code.str("");
+  code << "policy_prom_slice = SliceLayer(start_indices=[0, 56, 0], sizes=[-1, 8, " 
+       << policy_d_model << "], name='policy_prom_slice')(policy_k)";
+  py_.AppendPython(code.str());
+  
+  // Now transpose K for QK matmul
   code.str("");
   code << "policy_k = layers.Permute((2, 1), name='policy_k_transpose')(policy_k)";
   py_.AppendPython(code.str());
   
   // QK matmul
+  // Use custom MatMul layer
   code.str("");
-  code << "policy_qk = layers.Lambda(lambda inputs: ops.matmul(inputs[0], inputs[1]), output_shape=(64, 64), name='policy_qk_matmul')([policy_q, policy_k])";
+  code << "policy_qk = MatMul(name='policy_qk_matmul')([policy_q, policy_k])";
   py_.AppendPython(code.str());
   
-  // Scale - use Lambda to multiply by scalar directly
+  // Scale - use Rescaling layer for scalar multiplication
   float scale = 1.0f / sqrtf(static_cast<float>(policy_d_model));
   
   code.str("");
-  code << "policy_qk = layers.Lambda(lambda x: x * " << std::setprecision(9) << std::fixed << scale 
-       << ", output_shape=(64, 64), name='policy_qk_scale')(policy_qk)";
-  py_.AppendPython(code.str());
-  
-  // Promotion handling
-  code.str("");
-  code << "policy_prom_slice = layers.Lambda(lambda x: ops.slice(x, [0, 56, 0], [-1, 8, " 
-       << policy_d_model << "]), output_shape=(" << policy_d_model << ", 8), name='policy_prom_slice')(policy_k)";
+  code << "policy_qk = layers.Rescaling(scale=" << std::setprecision(9) << std::fixed << scale 
+       << ", name='policy_qk_scale')(policy_qk)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1678,10 +1849,10 @@ std::string KerasConverter::MakeAttentionPolicy(
   py_.AppendPython(code.str());
   
   // Reshape from (batch, policy_d_model, 8) to (batch*8, policy_d_model)
+  // Use FlattenBatchSpatial for flattening
   code.str("");
-  code << "policy_prom_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-       << policy_d_model << ")), output_shape=(None, " << policy_d_model 
-       << "), name='policy_prom_reshape')(policy_prom_slice)";
+  code << "policy_prom_reshape = FlattenBatchSpatial(" << policy_d_model
+       << ", name='policy_prom_reshape')(policy_prom_slice)";
   py_.AppendPython(code.str());
   
   std::string ip4_pol_w_var = "policy_ip4_pol_w";
@@ -1704,9 +1875,9 @@ std::string KerasConverter::MakeAttentionPolicy(
   code << "policy_prom = policy_prom_layer(policy_prom_reshape)";
   py_.AppendPython(code.str());
   
-  // Reshape from (batch*8, 4) to (batch, 8, 4) before transpose
+  // Reshape from (batch*8, 4) to (batch, 8, 4) before transpose - use DynamicReshape
   code.str("");
-  code << "policy_prom = layers.Lambda(lambda x: ops.reshape(x, (-1, 8, 4)), output_shape=(8, 4), name='policy_prom_reshape_3d')(policy_prom)";
+  code << "policy_prom = DynamicReshape(target_shape=(-1, 8, 4), output_shape_tuple=(None, 8, 4), name='policy_prom_reshape_3d')(policy_prom)";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1730,21 +1901,25 @@ std::string KerasConverter::MakeAttentionPolicy(
   py_.AppendPython(code.str());
   
   code.str("");
-  code << "policy_prom = layers.Reshape((1, 24), name='policy_prom_reshape')(" 
+  code << "policy_prom = layers.Reshape((1, 24), name='policy_prom_reshape_1x24')(" 
        << "policy_prom)";
   py_.AppendPython(code.str());
   
-  // Promotion slice from qk
+  // Promotion slice from qk - use custom SliceLayer
   code.str("");
-  code << "policy_qk_slice = layers.Lambda(lambda x: ops.slice(x, [0, 48, 56], [-1, 8, 8]), output_shape=(8, 8), name='policy_qk_slice')(policy_qk)";
+  code << "policy_qk_slice = SliceLayer(start_indices=[0, 48, 56], sizes=[-1, 8, 8], name='policy_qk_slice')(policy_qk)";
   py_.AppendPython(code.str());
   
+  // Use Reshape layer
   code.str("");
-  code << "policy_qk_slice = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, 1)), output_shape=(64, 1), name='policy_qk_slice_reshape')(policy_qk_slice)";
+  code << "policy_qk_slice = layers.Reshape((64, 1), name='policy_qk_slice_reshape')(policy_qk_slice)";
   py_.AppendPython(code.str());
   
+  // Use custom layer for repeat - but this is a repeat along an existing axis, not expand
+  // For this, we need a different approach - use ops.repeat directly but in a custom layer
+  // Actually, let's create a simple repeat by concatenation
   code.str("");
-  code << "policy_qk_slice = layers.Lambda(lambda x: ops.repeat(x, 3, axis=-1), output_shape=(64, 3), name='policy_qk_slice_repeat')(policy_qk_slice)";
+  code << "policy_qk_slice = layers.Concatenate(axis=-1, name='policy_qk_slice_repeat')([policy_qk_slice, policy_qk_slice, policy_qk_slice])";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -1768,8 +1943,9 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // Reshape to (batch*64, 67*64) like ONNX does before gather
   // policy_qk_prom is (batch*64, 67, 64) after concat, need to flatten last two dims
+  // Use FlattenBatchSpatial for flattening
   code.str("");
-  code << "policy_qk_prom = layers.Lambda(lambda x: ops.reshape(x, (-1, 67 * 64)), output_shape=(None, 67 * 64), name='policy_qk_prom_reshape')(policy_qk_prom)";
+  code << "policy_qk_prom = FlattenBatchSpatial(67 * 64, name='policy_qk_prom_reshape')(policy_qk_prom)";
   py_.AppendPython(code.str());
   
   // Create policy mapping and convert to TensorFlow constant
@@ -1785,12 +1961,12 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   // Gather with axis=1: policy_qk_prom is (batch*64, 67*64), policy_map_int is (1858,)
   // Result: (batch*64, 1858)
-  // Use keras.ops.gather to match ONNX gather behavior
+  // Use custom Gather layer
   code.str("");
-  code << "policy_output = layers.Lambda(lambda x: ops.gather(x, policy_map_int, axis=1), output_shape=(None, 1858), name='policy_gather')(policy_qk_prom)";
+  code << "policy_output = Gather(axis=1, name='policy_gather')([policy_qk_prom, policy_map_int])";
   py_.AppendPython(code.str());
   
-  
+  output_vars_.push_back("policy_output");
   return "policy_output";
 }
 
@@ -1854,15 +2030,15 @@ std::string KerasConverter::MakePolicyHead(const MultiHeadWeights& weights,
     py_.AppendPython(code.str());
     
     // Reshape to (batch*64, conv_size*8*8) before gather (like ONNX does)
+    // Use FlattenBatchSpatial for flattening
     code.str("");
-    code << "policy_flat_reshaped = layers.Lambda(lambda x: ops.reshape(x, (-1, "
-         << (head.policy.biases.size() * 8 * 8) << ")), output_shape=(None, " 
-         << (head.policy.biases.size() * 8 * 8) << "), name='policy_flat_reshaped')(policy_flat)";
+    code << "policy_flat_reshaped = FlattenBatchSpatial("
+         << (head.policy.biases.size() * 8 * 8) << ", name='policy_flat_reshaped')(policy_flat)";
     py_.AppendPython(code.str());
     
-    // Gather with axis=1 using keras.ops.gather
+    // Gather with axis=1 - use custom Gather layer
     code.str("");
-    code << "policy_output = layers.Lambda(lambda x: ops.gather(x, policy_map_int, axis=1), output_shape=(None, 1858), name='policy_gather')(policy_flat_reshaped)";
+    code << "policy_output = Gather(axis=1, name='policy_gather')([policy_flat_reshaped, policy_map_int])";
     py_.AppendPython(code.str());
     
   } else {
@@ -1958,8 +2134,11 @@ std::string KerasConverter::MakeValueHead(const MultiHeadWeights& weights,
                                                  default_activation_);
     
     // Reshape from (batch*64, val_channels) to (batch, 64, val_channels) then to (batch, val_channels*8*8)
+    // Use DynamicReshape for unflattening with dynamic batch
     code.str("");
-    code << "value_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << val_channels << ")), output_shape=(64, " << val_channels << "), name='value_reshape_3d')(" << value_embed_act << ")";
+    code << "value_reshape = DynamicReshape(target_shape=(-1, 64, " << val_channels 
+         << "), output_shape_tuple=(None, 64, " << val_channels 
+         << "), name='value_reshape_3d')(" << value_embed_act << ")";
     py_.AppendPython(code.str());
     
     code.str("");
@@ -2127,8 +2306,11 @@ std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
                                                 default_activation_);
     
     // Reshape from (batch*64, mlh_channels) to (batch, 64, mlh_channels) then to (batch, mlh_channels*8*8)
+    // Use DynamicReshape for unflattening with dynamic batch
     code.str("");
-    code << "mlh_reshape = layers.Lambda(lambda x: ops.reshape(x, (-1, 64, " << mlh_channels << ")), output_shape=(64, " << mlh_channels << "), name='mlh_reshape_3d')(" << mlh_embed_act << ")";
+    code << "mlh_reshape = DynamicReshape(target_shape=(-1, 64, " << mlh_channels 
+         << "), output_shape_tuple=(None, 64, " << mlh_channels 
+         << "), name='mlh_reshape_3d')(" << mlh_embed_act << ")";
     py_.AppendPython(code.str());
     
     code.str("");
