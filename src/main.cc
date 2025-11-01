@@ -34,6 +34,7 @@
 #include "tools/benchmark.h"
 #include "tools/describenet.h"
 #include "tools/leela2onnx.h"
+#include "tools/leela2keras.h"
 #include "tools/onnx2leela.h"
 #include "utils/commandline.h"
 #include "utils/esc_codes.h"
@@ -95,6 +96,7 @@ int main(int argc, const char** argv) {
       CommandLine::RegisterMode("backendbench",
                                 "Quick benchmark of backend only");
       CommandLine::RegisterMode("leela2onnx", "Convert Leela network to ONNX.");
+      CommandLine::RegisterMode("leela2keras", "Convert Leela network to Keras.");
       CommandLine::RegisterMode("onnx2leela",
                                 "Convert ONNX network to Leela net.");
       CommandLine::RegisterMode("describenet",
@@ -126,6 +128,8 @@ int main(int argc, const char** argv) {
       benchmark.Run();
     } else if (CommandLine::ConsumeCommand("leela2onnx")) {
       lczero::ConvertLeelaToOnnx();
+    } else if (CommandLine::ConsumeCommand("leela2keras")) {
+      lczero::ConvertLeelaToKeras();
     } else if (CommandLine::ConsumeCommand("onnx2leela")) {
       lczero::ConvertOnnxToLeela();
     } else if (CommandLine::ConsumeCommand("describenet")) {
