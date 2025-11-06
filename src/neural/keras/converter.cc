@@ -622,6 +622,16 @@ std::string KerasConverter::MakeActivation(const std::string& input_var,
       code << name << " = layers.Activation('sigmoid', name='" << name << "')(" 
            << input_var << ")";
       break;
+    case ACTIVATION_RELU_2: {
+      // Squared ReLU: ReLU(x) * ReLU(x)
+      std::string relu_out = name + "_relu";
+      code << relu_out << " = layers.ReLU(name='" << relu_out << "')(" << input_var << ")";
+      py_.AppendPython(code.str());
+      code.str("");
+      code << name << " = layers.Multiply(name='" << name << "')([" << relu_out 
+           << ", " << relu_out << "])";
+      break;
+    }
     case ACTIVATION_NONE:
       return input_var;
     default:
@@ -640,7 +650,10 @@ std::string KerasConverter::MakeConvLayer(
     int kernel_size,
     bool activation) {
   
-  // Create kernel weights - Keras Conv2D expects (kernel_h, kernel_w, in_channels, out_channels)
+  // Create kernel weights
+  // Keras Conv2D ALWAYS expects weights in (kernel_h, kernel_w, in_channels, out_channels) format
+  // regardless of data_format. ONNX format is (out_channels, in_channels, kernel_h, kernel_w)
+  // So we need to transpose: {2, 3, 1, 0}
   std::string kernel_var = layer_name + "_kernel";
   std::vector<int> kernel_dims = {output_channels, input_channels, kernel_size, kernel_size};
   WeightsToNumpyArray(kernel_var, weights.weights, kernel_dims, {2, 3, 1, 0});
@@ -649,12 +662,13 @@ std::string KerasConverter::MakeConvLayer(
   std::string bias_var = layer_name + "_bias";
   WeightsToNumpyArray(bias_var, weights.biases, {output_channels});
   
-  // Create Conv2D layer
+  // Create Conv2D layer with channels_first format (NCHW)
   std::ostringstream code;
   code << layer_name << "_layer = layers.Conv2D("
        << "filters=" << output_channels << ", "
        << "kernel_size=" << kernel_size << ", "
        << "padding='same', "
+       << "data_format='channels_first', "
        << "use_bias=True, "
        << "name='" << layer_name << "'"
        << ")";
@@ -686,8 +700,8 @@ std::string KerasConverter::MakeSqueezeAndExcite(
   
   std::ostringstream code;
   
-  // Global average pooling
-  code << name << "_pool = layers.GlobalAveragePooling2D(name='" 
+  // Global average pooling (with channels_first format)
+  code << name << "_pool = layers.GlobalAveragePooling2D(data_format='channels_first', name='" 
        << name << "_pool')(" << input_var << ")";
   py_.AppendPython(code.str());
   
@@ -742,20 +756,20 @@ std::string KerasConverter::MakeSqueezeAndExcite(
   code << name << "_dense2 = " << name << "_dense2_layer(" << dense1_act << ")";
   py_.AppendPython(code.str());
   
-  // Reshape to match spatial dimensions
+  // Reshape to match spatial dimensions (channels_first: (batch, channels, 1, 1))
   code.str("");
-  code << name << "_reshape = layers.Reshape((1, 1, " << (2 * NumFilters())
-       << "), name='" << name << "_reshape')(" << name << "_dense2)";
+  code << name << "_reshape = layers.Reshape((" << (2 * NumFilters())
+       << ", 1, 1), name='" << name << "_reshape')(" << name << "_dense2)";
   py_.AppendPython(code.str());
   
-  // Split into two parts (sigmoid and additive) - use slicing instead of Lambda
+  // Split into two parts (sigmoid and additive) - use slicing on channel axis (axis=1 in NCHW)
   int half_filters = NumFilters();
   code.str("");
-  code << name << "_split_0 = " << name << "_reshape[:, :, :, :" << half_filters << "]";
+  code << name << "_split_0 = " << name << "_reshape[:, :" << half_filters << ", :, :]";
   py_.AppendPython(code.str());
   
   code.str("");
-  code << name << "_split_1 = " << name << "_reshape[:, :, :, " << half_filters << ":]";
+  code << name << "_split_1 = " << name << "_reshape[:, " << half_filters << ":, :, :]";
   py_.AppendPython(code.str());
   
   code.str("");
@@ -977,12 +991,16 @@ std::string KerasConverter::MakeSmolgen(
        << encoder_in << ")";
   py_.AppendPython(code.str());
   
-  // Use DynamicReshape for flattening with dynamic batch
+  // Unflatten from (batch*64, hidden_channels) to (batch, 64, hidden_channels)
+  // then flatten to (batch, 64*hidden_channels)
   code.str("");
-  code << name << "_smolgen_compress = DynamicReshape(target_shape=(-1, " 
-       << (64 * smolgen_hidden_channels) << "), output_shape_tuple=(None, " 
-       << (64 * smolgen_hidden_channels) << "), name='"
-       << sanitized_name << "_smolgen_compress_reshape')(" << name
+  code << name << "_smolgen_compress = UnflattenBatchSpatial(" << smolgen_hidden_channels
+       << ", name='" << sanitized_name << "_smolgen_unflatten')(" << name << "_smolgen_compress)";
+  py_.AppendPython(code.str());
+  
+  code.str("");
+  code << name << "_smolgen_compress = layers.Reshape((" << (64 * smolgen_hidden_channels) 
+       << ",), name='" << sanitized_name << "_smolgen_compress_reshape')(" << name
        << "_smolgen_compress)";
   py_.AppendPython(code.str());
   
@@ -1556,10 +1574,11 @@ std::string KerasConverter::MakeAttentionBody(
   
   // Encoder layers
   int heads = weights.encoder_head_count;
+  float alpha = std::pow(2.0f * NumEncBlocks(), -0.25f);
   for (size_t i = 0; i < NumEncBlocks(); ++i) {
     std::string enc_name = "enc_layer_" + std::to_string(i);
     flow = MakeEncoderLayer(flow, weights.encoder[i], embedding_size, heads,
-                           enc_name, default_activation_, weights);
+                           enc_name, default_activation_, weights, alpha);
   }
   
   return flow;
@@ -1642,7 +1661,7 @@ std::string KerasConverter::MakeAttentionPolicy(
   
   flow = MakeActivation("policy_dense1", "policy_dense1_act", activation);
   
-  // Policy encoder layers
+  // Policy encoder layers (no alpha scaling - defaults to 1.0)
   for (size_t i = 0; i < head.pol_encoder.size(); i++) {
     std::string enc_name = "policy_enc_layer_" + std::to_string(i);
     flow = MakeEncoderLayer(flow, head.pol_encoder[i], policy_embedding_size,
@@ -1741,12 +1760,8 @@ std::string KerasConverter::MakeAttentionPolicy(
        << ", name='policy_qk_scale')(policy_qk)";
   py_.AppendPython(code.str());
   
-  code.str("");
-  code << "policy_prom_slice = layers.Permute((2, 1), name='policy_prom_slice_transpose')(policy_prom_slice)";
-  py_.AppendPython(code.str());
-  
-  // Reshape from (batch, policy_d_model, 8) to (batch*8, policy_d_model)
-  // Use FlattenBatchSpatial for flattening
+  // Reshape from (batch, 8, policy_d_model) to (batch*8, policy_d_model)
+  // Use FlattenBatchSpatial for flattening - no transpose needed!
   code.str("");
   code << "policy_prom_reshape = FlattenBatchSpatial(" << policy_d_model
        << ", name='policy_prom_reshape')(policy_prom_slice)";
@@ -2117,7 +2132,7 @@ std::string KerasConverter::MakeValueHead(const MultiHeadWeights& weights,
   
   int output_size = wdl ? 3 : 1;
   std::string ip2_val_w_var = "value_ip2_w";
-  WeightsToNumpyArray(ip2_val_w_var, head.ip2_val_w, {128, output_size});
+  WeightsToNumpyArray(ip2_val_w_var, head.ip2_val_w, {128, output_size}, {1, 0});
   
   std::string ip2_val_b_var = "value_ip2_b";
   WeightsToNumpyArray(ip2_val_b_var, head.ip2_val_b, {output_size});
@@ -2263,7 +2278,7 @@ std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
   
   // Final dense
   std::string ip2_mov_w_var = "mlh_ip2_w";
-  WeightsToNumpyArray(ip2_mov_w_var, weights.ip2_mov_w, {mlh_fc1_outputs, 1});
+  WeightsToNumpyArray(ip2_mov_w_var, weights.ip2_mov_w, {mlh_fc1_outputs, 1}, {1, 0});
   
   std::string ip2_mov_b_var = "mlh_ip2_b";
   WeightsToNumpyArray(ip2_mov_b_var, weights.ip2_mov_b, {1});
@@ -2298,14 +2313,8 @@ void KerasConverter::ConvertToKeras(const std::string& output_path) {
   MultiHeadWeights weights(src_.weights());
   
   // Build input layer (already done in constructor)
+  // Keep input in NCHW format - transpose will happen in MakeAttentionBody if needed
   current_flow_var_ = options_.input_name;
-  
-  // Transpose input from NCHW (channels first) to NHWC (channels last) format
-  // This matches ONNX converter which does: Transpose {0, 2, 3, 1}
-  // Input: (batch, 112, 8, 8) -> Output: (batch, 8, 8, 112)
-  py_.AppendPython("input_transposed = layers.Permute((2, 3, 1), name='input_transpose')(" + 
-                   current_flow_var_ + ")");
-  current_flow_var_ = "input_transposed";
   
   // Input convolution
   if (NumResBlocks() > 0) {
