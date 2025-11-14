@@ -5,11 +5,9 @@ This module contains custom serializable layers used by the LCZero Keras convert
 Import this module before loading LCZero Keras models to register the custom layers.
 """
 
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
 from keras import ops
 import keras as keras_core
+from keras import layers
 
 # Register all custom layers with Keras serialization
 @keras_core.saving.register_keras_serializable()
@@ -27,19 +25,43 @@ class MatMul(layers.Layer):
 
 @keras_core.saving.register_keras_serializable()
 class Gather(layers.Layer):
-    """Gather layer with axis parameter."""
+    """Gather layer with axis parameter - backend agnostic."""
     def __init__(self, axis=0, **kwargs):
         super().__init__(**kwargs)
         self.axis = axis
     
     def call(self, inputs):
-        # keras.ops.gather doesn't exist, use tf.gather
-        return tf.gather(inputs[0], inputs[1], axis=self.axis)
+        # Backend-agnostic gather implementation
+        # Use swapaxes + take + swapaxes for maximum compatibility
+        data, indices = inputs[0], inputs[1]
+        
+        # Convert indices to int32 if needed
+        indices = ops.cast(indices, dtype='int32')
+        
+        # For axis=1 (the common case), use swapaxes approach
+        if self.axis == 1:
+            # Move axis 1 to position 0
+            data_swapped = ops.swapaxes(data, 0, 1)  # (dim1, batch, ...)
+            
+            # Gather along axis 0 - this preserves the remaining dimensions
+            gathered_swapped = ops.take(data_swapped, indices, axis=0)  # (num_indices, batch, ...)
+            
+            # Swap back: (batch, num_indices, ...)
+            gathered = ops.swapaxes(gathered_swapped, 0, 1)
+            return gathered
+        elif self.axis == 0:
+            # For axis=0, ops.take with axis=0 should work directly
+            return ops.take(data, indices, axis=0)
+        else:
+            # For other axes, swap to 0, gather, swap back
+            data_swapped = ops.swapaxes(data, 0, self.axis)
+            gathered_swapped = ops.take(data_swapped, indices, axis=0)
+            return ops.swapaxes(gathered_swapped, 0, self.axis)
     
     def compute_output_shape(self, input_shapes):
         # Gathering along axis, indices shape replaces that dimension
         if self.axis == 1:
-            return (input_shapes[0][0], input_shapes[1][0])
+            return (input_shapes[0][0], input_shapes[1][0]) + input_shapes[0][2:]
         return input_shapes[0]
     
     def get_config(self):
