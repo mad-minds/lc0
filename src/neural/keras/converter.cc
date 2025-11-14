@@ -2219,17 +2219,12 @@ std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
     std::string mlh_embed_act = MakeActivation("mlh_embed", "mlh_embed_act", 
                                                 default_activation_);
     
-    // Reshape from (batch*64, mlh_channels) to (batch, 64, mlh_channels) then to (batch, mlh_channels*8*8)
-    // Use DynamicReshape for unflattening with dynamic batch
+    // Reshape directly from (batch*64, mlh_channels) to (batch, mlh_channels*8*8)
+    // Match ONNX converter which does a direct reshape
     code.str("");
-    code << "mlh_reshape = DynamicReshape(target_shape=(-1, 64, " << mlh_channels 
-         << "), output_shape_tuple=(None, 64, " << mlh_channels 
-         << "), name='mlh_reshape_3d')(" << mlh_embed_act << ")";
-    py_.AppendPython(code.str());
-    
-    code.str("");
-    code << "mlh_flat = layers.Reshape((" << (mlh_channels * 8 * 8) 
-         << ",), name='mlh_flat')(mlh_reshape)";
+    code << "mlh_flat = DynamicReshape(target_shape=(-1, " << (mlh_channels * 8 * 8) 
+         << "), output_shape_tuple=(None, " << (mlh_channels * 8 * 8) 
+         << "), name='mlh_flat')(" << mlh_embed_act << ")";
     py_.AppendPython(code.str());
     
     flow_var = "mlh_flat";
@@ -2300,10 +2295,9 @@ std::string KerasConverter::MakeMovesLeftHead(const MultiHeadWeights& weights,
   code << "mlh_output = mlh_dense2_layer(" << mlh_flow_var << ")";
   py_.AppendPython(code.str());
   
-  // Use output_mlh as the final layer name directly
-  code.str("");
-  code << "output_mlh = layers.ReLU(name='output_mlh')(" << "mlh_output)";
-  py_.AppendPython(code.str());
+  // Use MakeActivation to apply the default activation (Mish, ReLU, etc.)
+  // This matches the ONNX converter which uses MakeActivation for the final layer
+  std::string output_mlh = MakeActivation("mlh_output", "output_mlh", default_activation_);
   
   output_vars_.push_back("output_mlh");
   return "output_mlh";
