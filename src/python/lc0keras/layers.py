@@ -78,10 +78,15 @@ class DynamicTile(layers.Layer):
     def call(self, inputs):
         # inputs[0] is the reference tensor for batch size
         # inputs[1] is the tensor to tile (must be shape-compatible)
-        batch_size = ops.shape(inputs[0])[0:1]
-        expanded = ops.expand_dims(inputs[1], axis=0)
-        repeats = ops.concatenate([ops.reshape(batch_size, (1,)), ops.array([1, 1])])
-        return ops.tile(expanded, repeats)
+        # For JAX JIT compatibility, we need to avoid ops.tile with dynamic repeats
+        # Instead, use ops.repeat along axis 0 and then reshape
+        batch_size = ops.shape(inputs[0])[0]
+        # Expand to add batch dimension: (1, ...) -> (batch, ...)
+        expanded = ops.expand_dims(inputs[1], axis=0)  # (1, ...)
+        # Repeat along axis 0 batch_size times
+        # Use ops.repeat which is JIT-compatible with dynamic repeats
+        tiled = ops.repeat(expanded, batch_size, axis=0)  # (batch, ...)
+        return tiled
     
     def compute_output_shape(self, input_shapes):
         # Output shape: (batch, *input_shapes[1])
